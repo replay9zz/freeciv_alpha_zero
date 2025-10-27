@@ -46,11 +46,11 @@ and lets a trained checkpoint drive a specific unit. Pass the same map window
 size that the model was trained on (the default training scripts use 9x9):
 
 ```
-python -m freeciv.live_agent \
-  --unit-id 42 \
-  --checkpoint checkpoints/best.pth.tar \
-  --map-width 9 --map-height 9 \
-  --host 127.0.0.1 --port 4444
+python -m freeciv.train \
+  --map-width 9 --map-height 9 --max-turns 64 \
+  --num-iters 20 --num-eps 200 --num-mcts-sims 256 \
+  --arena-compare 40 --checkpoint temp/fcaz_long \
+  --enemy-density 0.0
 ```
 
 Keep a client open with `ENABLE_LUAREMOTE=1`, ensure the Lua helper scripts from
