@@ -1,25 +1,18 @@
 from __future__ import annotations
 
 import argparse
-import sys
-from pathlib import Path
 
-PACKAGE_ROOT = Path(__file__).resolve().parent
-REPO_ROOT = PACKAGE_ROOT.parent
-AZG_PATH = REPO_ROOT / "alpha-zero-general"
+try:
+    from freeciv_alpha_zero.Coach import Coach  # type: ignore
+    from freeciv_alpha_zero.utils import dotdict  # type: ignore
+except ModuleNotFoundError:  # pragma: no cover
+    from ..Coach import Coach
+    from ..utils import dotdict
 
-if str(REPO_ROOT) not in sys.path:
-    sys.path.insert(0, str(REPO_ROOT))
-if str(AZG_PATH) not in sys.path:
-    sys.path.append(str(AZG_PATH))
-
-from alpha_zero_general.Coach import Coach  # type: ignore
-from alpha_zero_general.utils import dotdict  # type: ignore
-
-from freeciv_alpha_zero.config import MapConfig, TrainingConfig
-from freeciv_alpha_zero.freeciv_game import FreecivGame
-from freeciv_alpha_zero.nnet import NNetWrapper
-from freeciv_alpha_zero.providers import RandomMapProvider
+from .config import MapConfig, TrainingConfig
+from .game import FreecivGame
+from .nnet import NNetWrapper
+from .providers import RandomMapProvider
 
 
 def parse_args() -> argparse.Namespace:
@@ -32,6 +25,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument('--num-mcts-sims', type=int, default=64)
     parser.add_argument('--arena-compare', type=int, default=10)
     parser.add_argument('--checkpoint', default='temp/fcaz', help='Directory for checkpoints')
+    parser.add_argument('--enemy-density', type=float, default=0.0, help='Probability of trap tiles in random maps')
     parser.add_argument('--load-model', action='store_true')
     parser.add_argument('--load-folder', default=None)
     parser.add_argument('--load-file', default=None)
@@ -42,7 +36,7 @@ def parse_args() -> argparse.Namespace:
 def main():
     args = parse_args()
     map_cfg = MapConfig(map_w=args.map_width, map_h=args.map_height, max_turns=args.max_turns)
-    provider = RandomMapProvider(map_cfg.map_w, map_cfg.map_h)
+    provider = RandomMapProvider(map_cfg.map_w, map_cfg.map_h, enemy_density=args.enemy_density)
     game = FreecivGame(map_cfg, provider)
     nnet = NNetWrapper(game)
 

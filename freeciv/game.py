@@ -1,21 +1,21 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from pathlib import Path
 from typing import List, Tuple
 
 import numpy as np
 
-# Ensure alpha-zero-general is importable when consumers run this module directly
-ROOT = Path(__file__).resolve().parents[1]
-if str(ROOT) not in __import__('sys').path:
-    __import__('sys').path.append(str(ROOT))
+try:
+    from freeciv_alpha_zero.Game import Game  # type: ignore
+except ModuleNotFoundError:  # pragma: no cover
+    try:
+        from ..Game import Game
+    except ImportError as exc:  # pragma: no cover
+        raise ImportError("Unable to locate Game definition for Freeciv package") from exc
 
-from alpha_zero_general.Game import Game  # type: ignore
-
-from freeciv_alpha_zero.config import MapConfig
-from freeciv_alpha_zero.providers import BaseProvider, RandomMapProvider
-from freeciv_alpha_zero.state import FreecivBoardState, Player
+from .config import MapConfig
+from .providers import BaseProvider, RandomMapProvider
+from .state import FreecivBoardState, Player
 
 
 @dataclass

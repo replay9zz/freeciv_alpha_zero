@@ -39,7 +39,15 @@ class BaseProvider:
 class RandomMapProvider(BaseProvider):
     """Generates a new random AU/enemy map each call."""
 
-    def __init__(self, width: int, height: int, *, p_open: float = 0.85, enemy_density: float = 0.05, rng: Optional[np.random.Generator] = None):
+    def __init__(
+        self,
+        width: int,
+        height: int,
+        *,
+        p_open: float = 0.85,
+        enemy_density: float = 0.0,
+        rng: Optional[np.random.Generator] = None,
+    ):
         super().__init__(width, height)
         self.p_open = p_open
         self.enemy_density = enemy_density

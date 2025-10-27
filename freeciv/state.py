@@ -7,8 +7,8 @@ import numpy as np
 
 from freeciv_rl.freeciv_movement import FreecivMovement
 
-from freeciv_alpha_zero.config import MapConfig
-from freeciv_alpha_zero.providers import BaseProvider, GroundTruth
+from .config import MapConfig
+from .providers import BaseProvider, GroundTruth
 
 Player = int  # 1 or -1
 Coord = Tuple[int, int]
@@ -26,6 +26,8 @@ class FreecivBoardState:
     turn: int = 0
     winner: Optional[Player] = None
     terminal_reason: Optional[str] = None
+    scores: Dict[Player, float] = field(default_factory=lambda: {1: 0.0, -1: 0.0})
+    prev_positions: Dict[Player, Optional[Coord]] = field(default_factory=lambda: {1: None, -1: None})
 
     ACTION_SIZE = 6
     PASS_ACTION = ACTION_SIZE
@@ -43,6 +45,8 @@ class FreecivBoardState:
         self.units = {}
         self.visited = {}
         self.revealed = {}
+        self.scores = {1: 0.0, -1: 0.0}
+        self.prev_positions = {1: None, -1: None}
 
         spawn_a = self._find_spawn((0, 0))
         spawn_b = self._find_spawn((self.cfg.map_w - 1, self.cfg.map_h - 1))
@@ -55,6 +59,7 @@ class FreecivBoardState:
             x, y = self.units[p]
             self.visited[p][y, x] = True
             self._reveal(p)
+            self.prev_positions[p] = None
 
     # ---------- helpers ----------
     def _find_spawn(self, start_hint: Coord) -> Coord:
@@ -115,6 +120,8 @@ class FreecivBoardState:
         new.turn = self.turn
         new.winner = self.winner
         new.terminal_reason = self.terminal_reason
+        new.scores = {p: score for p, score in self.scores.items()}
+        new.prev_positions = {p: pos for p, pos in self.prev_positions.items()}
         return new
 
     # ---------- game mechanics ----------
@@ -136,7 +143,11 @@ class FreecivBoardState:
     def step(self, player: Player, action: int) -> None:
         if self.winner is not None:
             return
+        prev_pos = self.units[player]
+
         if action == self.PASS_ACTION:
+            self.scores[player] += self.cfg.backtrack_penalty
+            self.prev_positions[player] = prev_pos
             self.turn += 1
             if self.turn >= self.cfg.max_turns:
                 self._resolve_terminal(reason="max_turns")
@@ -153,20 +164,41 @@ class FreecivBoardState:
         x, y = self.units[player]
         nx, ny = self.movement.get_native_neighbors(x, y)[action]
         if nx is None:
+            self.scores[player] += self.cfg.wall_penalty
             self.turn += 1
             return
         if self.gt.au_map[ny, nx] != 'A':
+            self.scores[player] += self.cfg.wall_penalty
             self.turn += 1
             return
 
+        was_visited = bool(self.visited[player][ny, nx])
+        prev_reveal = self.revealed[player].sum()
         self.units[player] = (nx, ny)
         self.visited[player][ny, nx] = True
         self._reveal(player)
+        newly_revealed = self.revealed[player].sum() - prev_reveal
+        if newly_revealed > 0:
+            self.scores[player] += self.cfg.frontier_bonus * newly_revealed
+
+        if not was_visited:
+            self.scores[player] += self.cfg.visit_reward
+        else:
+            self.scores[player] += self.cfg.backtrack_penalty
+
+        if self.prev_positions[player] is not None and (nx, ny) == self.prev_positions[player]:
+            self.scores[player] += self.cfg.backtrack_penalty
+        self.prev_positions[player] = prev_pos
+
         opponent = -player
         if self.units[player] == self.units[opponent]:
+            self.scores[player] += self.cfg.elimination_bonus
+            self.scores[opponent] -= self.cfg.elimination_bonus
             self._resolve_terminal(winner=player, reason="capture")
             return
         if self.gt.enemy_map[ny, nx]:
+            self.scores[opponent] += self.cfg.elimination_bonus
+            self.scores[player] -= self.cfg.elimination_bonus
             self._resolve_terminal(winner=opponent, reason="enemy_trap")
             return
 
@@ -188,8 +220,17 @@ class FreecivBoardState:
         total = max(1.0, float(self.cfg.map_w * self.cfg.map_h))
         normalized = diff / total
         if abs(normalized) < 1e-6:
-            return self.cfg.draw_value
-        return float(np.clip(normalized, -1.0, 1.0))
+            normalized = self.cfg.draw_value
+
+        score_delta = self.scores[1] - self.scores[-1]
+        score_scale = (
+            self.cfg.map_w * self.cfg.map_h * max(self.cfg.visit_reward + abs(self.cfg.frontier_bonus), 1e-3)
+            + self.cfg.max_turns * abs(self.cfg.backtrack_penalty)
+            + max(self.cfg.elimination_bonus, 0.0)
+        )
+        score_component = np.clip(score_delta / max(1.0, score_scale), -1.0, 1.0)
+
+        return float(np.clip(normalized + score_component, -1.0, 1.0))
 
     # ---------- encodings ----------
     def encode(self, perspective: Player) -> np.ndarray:

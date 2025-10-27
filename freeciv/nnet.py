@@ -9,11 +9,16 @@ import torch
 import torch.optim as optim
 from tqdm import tqdm
 
-from alpha_zero_general.NeuralNet import NeuralNet  # type: ignore
-from alpha_zero_general.utils import AverageMeter, dotdict  # type: ignore
+try:
+    from freeciv_alpha_zero.NeuralNet import NeuralNet  # type: ignore
+    from freeciv_alpha_zero.utils import AverageMeter, dotdict  # type: ignore
+    from freeciv_alpha_zero.pytorch.NNet import FreecivNNet  # type: ignore
+except ModuleNotFoundError:  # pragma: no cover
+    from ..NeuralNet import NeuralNet
+    from ..utils import AverageMeter, dotdict
+    from ..pytorch.NNet import FreecivNNet
 
-from freeciv_alpha_zero.freeciv_game import CanonicalBoard
-from freeciv_alpha_zero.pytorch.NNet import FreecivNNet
+from .game import CanonicalBoard
 
 nnet_args = dotdict({
     'lr': 1e-3,
@@ -95,7 +100,7 @@ class NNetWrapper(NeuralNet):
         if not os.path.exists(filepath):
             raise FileNotFoundError(f"No model in path {filepath}")
         map_location = None if nnet_args.cuda else 'cpu'
-        checkpoint = torch.load(filepath, map_location=map_location)
+        checkpoint = torch.load(filepath, map_location=map_location, weights_only=True)
         self.nnet.load_state_dict(checkpoint['state_dict'])
 
     # ---- helpers ----
