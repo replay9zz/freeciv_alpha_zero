@@ -8,13 +8,16 @@ retaining hooks into the real Freeciv LuaRemote runner for future expansion.
 ## Directory layout
 ```
 freeciv_alpha_zero/
-  config.py           # Env/training hyper parameters (map size, rewards)
-  providers.py        # Map providers (random generator or LuaRemote stubs)
-  state.py            # Deterministic board representation & helpers
-  freeciv_game.py     # AlphaZero Game implementation (two-player explore/fight)
-  nnet.py             # NeuralNet wrapper that Coach expects
-  pytorch/NNet.py     # Actual PyTorch module (policy + value heads)
-  train.py            # CLI that wires FreecivGame + Coach + NNet
+  Arena.py / Coach.py / MCTS.py / utils.py  # vendored alpha-zero-general core
+  freeciv/
+    config.py        # Env/training hyper parameters (map size, rewards)
+    game.py          # AlphaZero Game implementation (two-player explore/fight)
+    nnet.py          # NeuralNet wrapper that Coach expects
+    providers.py     # Map providers (random generator + LuaRemote bridge)
+    state.py         # Deterministic board representation & helpers
+    train.py         # Self-play + training CLI
+    live_agent.py    # Run a trained agent against a live Freeciv client
+  pytorch/NNet.py    # Actual PyTorch module (policy + value heads)
 ```
 
 ## High level idea
@@ -31,16 +34,34 @@ freeciv_alpha_zero/
 
 ## Training
 ```
-python freeciv_alpha_zero/train.py --episodes 20 --map-width 9 --map-height 9
+python -m freeciv.train --num-iters 5 --num-eps 50 --num-mcts-sims 128 --enemy-density 0.0
 ```
-This CLI wraps `alpha-zero-general/Coach.py`; see the file for all options and
-how to point it at an existing experiment directory. Because `alpha-zero-general`
-expects `Game`/`NeuralNet` implementations inside `sys.path`, the script
-auto-appends both the current repo root and `alpha-zero-general/`.
+The module wires `FreecivGame`, `Coach`, and `NNetWrapper` together using the
+vendored AlphaZero utilities. See `freeciv/train.py` for the full list of CLI
+flags (checkpoint paths, map dimensions, resume options, etc.).
+
+## Running against a live Freeciv client
+`freeciv/live_agent.py` connects to a Freeciv GTK client with LuaRemote enabled
+and lets a trained checkpoint drive a specific unit. Pass the same map window
+size that the model was trained on (the default training scripts use 9x9):
+
+```
+python -m freeciv.live_agent \
+  --unit-id 42 \
+  --checkpoint checkpoints/best.pth.tar \
+  --map-width 9 --map-height 9 \
+  --host 127.0.0.1 --port 4444
+```
+
+Keep a client open with `ENABLE_LUAREMOTE=1`, ensure the Lua helper scripts from
+`freeciv/lua/` are loaded, and pass the unit id you want to control (see the
+client's Lua console or use `freeciv_rl/run_model_agent.py` to list units). The
+agent mirrors the player's local vision to create an observation for the neural
+network and issues moves via `client.move_dir`.
 
 ## Next steps
-- Flesh out `LuaRemoteProvider` to mirror the actual Freeciv game state and
-  allow self-play against the in-game AI or scripted opponents.
+- Improve the live agent to blend AlphaZero policy with LuaRemote combat orders
+  (auto-attack, defensive moves, etc.).
 - Extend `FreecivBoardState` with multiple units, combat, and production queues
   so the state/action space is closer to full Freeciv.
 - Add visualization tooling or logging hooks for TensorBoard / replay export.
