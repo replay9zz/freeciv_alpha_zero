@@ -332,6 +332,29 @@ def main() -> None:
         )
         visited_tiles.add(snapshot.player_pos)
 
+        # Attempt to attack immediately if an enemy unit is adjacent.
+        px, py = snapshot.player_pos
+        enemy_targets: List[Tuple[int, int, int]] = []
+        for idx, (nx, ny) in enumerate(movement.get_native_neighbors(px, py)):
+            if nx is None or ny is None:
+                continue
+            status = snapshot.status_lookup.get((nx, ny))
+            if not status:
+                continue
+            _au_char, _enemy_flag, enemy_units, friendly_units = status
+            if enemy_units and not friendly_units:
+                enemy_targets.append((idx, nx, ny))
+
+        if enemy_targets:
+            idx, nx, ny = enemy_targets[0]
+            success = client.attack_target(args.unit_id, nx, ny)
+            client.end_turn()
+            print(f"[step {steps}] attack target=({nx},{ny}) dir_idx={idx} success={success}")
+            previous_pos = snapshot.player_pos
+            time.sleep(args.sleep)
+            steps += 1
+            continue
+
         board_state = build_state(map_cfg, snapshot)
         canonical = CanonicalBoard(board_state, 1)
         pi, _value = nnet.predict(canonical)
