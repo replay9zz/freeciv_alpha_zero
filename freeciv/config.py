@@ -5,9 +5,11 @@ from dataclasses import dataclass
 
 @dataclass
 class MapConfig:
-    map_w: int = 9
-    map_h: int = 9
-    max_turns: int = 64
+    # x-axis, horizonatal, not GUI number
+    map_w: int = 4
+    # y-axis, vertical, not GUI number 
+    map_h: int = 16
+    max_turns: int = 120
     fog_radius: int = 2
     frontier_bonus: float = 0.05
     visit_reward: float = 0.1
@@ -15,6 +17,9 @@ class MapConfig:
     wall_penalty: float = -0.15
     elimination_bonus: float = 0.5
     draw_value: float = 1e-4
+    build_city_reward: float = 0.15
+    special_completion_reward: float = 0.25
+    special_build_time: int = 3
 
 
 @dataclass

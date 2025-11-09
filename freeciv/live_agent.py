@@ -13,6 +13,7 @@ try:
     from freeciv_rl.freeciv_luaremote import LuaRemoteClient  # type: ignore
     from freeciv_rl.freeciv_movement import FreecivMovement  # type: ignore
     from freeciv_rl.lua_helper import (  # type: ignore
+        list_all_units,
         list_visible_tiles_call,
         parse_position_result,
         parse_vision_tiles,
@@ -29,6 +30,7 @@ except Exception:
         from freeciv_rl.freeciv_luaremote import LuaRemoteClient  # type: ignore
         from freeciv_rl.freeciv_movement import FreecivMovement  # type: ignore
         from freeciv_rl.lua_helper import (  # type: ignore
+            list_all_units,
             list_visible_tiles_call,
             parse_position_result,
             parse_vision_tiles,
@@ -68,6 +70,29 @@ def chunked(seq: Iterable[Tuple[int, int]], size: int) -> Iterable[List[Tuple[in
         yield bucket
 
 
+def discover_controlled_units(
+    client: LuaRemoteClient,
+    player_hint: Optional[int],
+) -> Tuple[List[int], Optional[int]]:
+    try:
+        units = list_all_units(client)
+    except Exception as exc:  # pragma: no cover - remote failure
+        raise RuntimeError("Failed to enumerate units via LuaRemote.") from exc
+
+    player_id = player_hint
+    if player_id is None:
+        for _uid, _x, _y, unit_owner in units:
+            if unit_owner >= 0:
+                player_id = unit_owner
+                break
+
+    if player_id is None:
+        return [], None
+
+    controlled = [uid for uid, _x, _y, unit_owner in units if unit_owner == player_id]
+    return controlled, player_id
+
+
 def build_state(cfg: MapConfig, snapshot: Snapshot) -> FreecivBoardState:
     state = FreecivBoardState.__new__(FreecivBoardState)  # type: ignore[misc]
     state.cfg = cfg
@@ -98,7 +123,7 @@ def gather_snapshot(
     movement: FreecivMovement,
     cfg: MapConfig,
     unit_id: int,
-    owner_id: Optional[int],
+    player_id: Optional[int],
     known_tiles: Dict[Tuple[int, int], str],
     known_enemy: Dict[Tuple[int, int], bool],
     visited_tiles: Set[Tuple[int, int]],
@@ -109,15 +134,15 @@ def gather_snapshot(
         raise RuntimeError("Controlled unit was not found in the current Freeciv session.")
 
     player_pos = (pos_info[0], pos_info[1])
-    if owner_id is None and pos_info[2] is not None and pos_info[2] >= 0:
-        owner_id = int(pos_info[2])
+    if player_id is None and pos_info[2] is not None and pos_info[2] >= 0:
+        player_id = int(pos_info[2])
 
     visible_tiles: Set[Tuple[int, int]] = set()
     status_lookup: Dict[Tuple[int, int], Tuple[str, bool, bool, bool]] = {}
 
-    if owner_id is not None:
+    if player_id is not None:
         try:
-            tiles_result = client.eval(list_visible_tiles_call(owner_id, unit_id))
+            tiles_result = client.eval(list_visible_tiles_call(player_id, unit_id))
             visible_tiles = set(parse_vision_tiles(tiles_result))
         except Exception:
             visible_tiles = set()
@@ -192,7 +217,7 @@ def gather_snapshot(
         enemy_pos=enemy_pos,
         status_lookup=status_lookup,
     )
-    return snapshot, owner_id
+    return snapshot, player_id
 
 
 def choose_action(
@@ -285,7 +310,8 @@ def main() -> None:
     ap.add_argument('--host', default='127.0.0.1')
     ap.add_argument('--port', type=int, default=4444)
     ap.add_argument('--timeout', type=float, default=2.5)
-    ap.add_argument('--unit-id', type=int, required=True)
+    ap.add_argument('--unit-id', type=int, help='Control a single unit id (disables auto-discovery).')
+    ap.add_argument('--player-id', type=int, help='Restrict auto-discovery to a specific player id.')
     ap.add_argument('--checkpoint', required=True)
     ap.add_argument('--map-width', type=int, default=9)
     ap.add_argument('--map-height', type=int, default=9)
@@ -306,82 +332,116 @@ def main() -> None:
     client = LuaRemoteClient(args.host, args.port, timeout=args.timeout)
     client.connect()
 
-    owner_id: Optional[int] = None
-    pos_result = client.eval(simple_find_unit_pos(args.unit_id))
-    pos_info = parse_position_result(pos_result)
-    if pos_info and pos_info[2] is not None and pos_info[2] >= 0:
-        owner_id = int(pos_info[2])
+    player_id: Optional[int] = args.player_id
+    controlled_units: List[int]
+    if args.unit_id is not None:
+        controlled_units = [args.unit_id]
+        pos_result = client.eval(simple_find_unit_pos(args.unit_id))
+        pos_info = parse_position_result(pos_result)
+        if pos_info and pos_info[2] is not None and pos_info[2] >= 0:
+            player_id = int(pos_info[2])
+    else:
+        controlled_units, player_id = discover_controlled_units(client, player_id)
+        if not controlled_units:
+            raise SystemExit(
+                "No controllable units were discovered. Provide --unit-id or --player-id to limit the search."
+            )
+        print(
+            f"Discovered {len(controlled_units)} unit(s) for player {player_id if player_id is not None else 'unknown'}."
+        )
 
     movement = FreecivMovement(map_width=map_cfg.map_w, map_height=map_cfg.map_h)
     known_tiles: Dict[Tuple[int, int], str] = {}
     known_enemy: Dict[Tuple[int, int], bool] = {}
     visited_tiles: Set[Tuple[int, int]] = set()
-    previous_pos: Optional[Tuple[int, int]] = None
+    previous_pos: Dict[int, Optional[Tuple[int, int]]] = {uid: None for uid in controlled_units}
 
     steps = 0
-    while steps < args.max_steps:
-        snapshot, owner_id = gather_snapshot(
-            client=client,
-            movement=movement,
-            cfg=map_cfg,
-            unit_id=args.unit_id,
-            owner_id=owner_id,
-            known_tiles=known_tiles,
-            known_enemy=known_enemy,
-            visited_tiles=visited_tiles,
-        )
-        visited_tiles.add(snapshot.player_pos)
-
-        # Attempt to attack immediately if an enemy unit is adjacent.
-        px, py = snapshot.player_pos
-        enemy_targets: List[Tuple[int, int, int]] = []
-        for idx, (nx, ny) in enumerate(movement.get_native_neighbors(px, py)):
-            if nx is None or ny is None:
+    turns = 0
+    while steps < args.max_steps and controlled_units:
+        acted_this_turn = False
+        for unit_id in list(controlled_units):
+            if steps >= args.max_steps:
+                break
+            try:
+                snapshot, player_id = gather_snapshot(
+                    client=client,
+                    movement=movement,
+                    cfg=map_cfg,
+                    unit_id=unit_id,
+                    player_id=player_id,
+                    known_tiles=known_tiles,
+                    known_enemy=known_enemy,
+                    visited_tiles=visited_tiles,
+                )
+            except RuntimeError as exc:
+                print(f"[step {steps}] unit {unit_id} unavailable: {exc}")
+                controlled_units.remove(unit_id)
+                previous_pos.pop(unit_id, None)
                 continue
-            status = snapshot.status_lookup.get((nx, ny))
-            if not status:
-                continue
-            _au_char, _enemy_flag, enemy_units, friendly_units = status
-            if enemy_units and not friendly_units:
-                enemy_targets.append((idx, nx, ny))
+            visited_tiles.add(snapshot.player_pos)
 
-        if enemy_targets:
-            idx, nx, ny = enemy_targets[0]
-            success = client.attack_target(args.unit_id, nx, ny)
-            client.end_turn()
-            print(f"[step {steps}] attack target=({nx},{ny}) dir_idx={idx} success={success}")
-            previous_pos = snapshot.player_pos
+            # Attempt to attack immediately if an enemy unit is adjacent.
+            px, py = snapshot.player_pos
+            enemy_targets: List[Tuple[int, int, int]] = []
+            for idx, (nx, ny) in enumerate(movement.get_native_neighbors(px, py)):
+                if nx is None or ny is None:
+                    continue
+                status = snapshot.status_lookup.get((nx, ny))
+                if not status:
+                    continue
+                _au_char, _enemy_flag, enemy_units, friendly_units = status
+                if enemy_units and not friendly_units:
+                    enemy_targets.append((idx, nx, ny))
+
+            if enemy_targets:
+                idx, nx, ny = enemy_targets[0]
+                success = client.attack_target(unit_id, nx, ny)
+                print(
+                    f"[step {steps}] unit={unit_id} attack target=({nx},{ny}) dir_idx={idx} success={success}"
+                )
+                previous_pos[unit_id] = snapshot.player_pos
+                time.sleep(args.sleep)
+                steps += 1
+                acted_this_turn = True
+                continue
+
+            board_state = build_state(map_cfg, snapshot)
+            canonical = CanonicalBoard(board_state, 1)
+            pi, _value = nnet.predict(canonical)
+            action = choose_action(
+                snapshot,
+                pi,
+                board_state.ACTION_SIZE + 1,
+                movement,
+                visited_tiles,
+                previous_pos.get(unit_id),
+            )
+
+            if action == board_state.PASS_ACTION:
+                print(f"[step {steps}] unit={unit_id} pass (no valid moves)")
+                previous_pos[unit_id] = None
+            elif 0 <= action < len(dir_ids):
+                dir_id = dir_ids[action]
+                success = client.move_dir_id(unit_id, dir_id)
+                print(f"[step {steps}] unit={unit_id} move dir_id={dir_id} success={success}")
+                previous_pos[unit_id] = snapshot.player_pos
+            else:
+                print(f"[step {steps}] unit={unit_id} unsupported action={action}; skipping")
+                previous_pos[unit_id] = None
             time.sleep(args.sleep)
             steps += 1
-            continue
+            acted_this_turn = True
 
-        board_state = build_state(map_cfg, snapshot)
-        canonical = CanonicalBoard(board_state, 1)
-        pi, _value = nnet.predict(canonical)
-        action = choose_action(
-            snapshot,
-            pi,
-            board_state.ACTION_SIZE + 1,
-            movement,
-            visited_tiles,
-            previous_pos,
-        )
+        client.end_turn()
+        turns += 1
+        if not acted_this_turn:
+            time.sleep(args.sleep)
 
-        if action == board_state.PASS_ACTION:
-            client.end_turn()
-            print(f"[step {steps}] pass (no valid moves)")
-            previous_pos = None
-        else:
-            dir_id = dir_ids[action]
-            success = client.move_dir_id(args.unit_id, dir_id)
-            client.end_turn()
-            print(f"[step {steps}] move dir_id={dir_id} success={success}")
-            previous_pos = snapshot.player_pos
-
-        time.sleep(args.sleep)
-        steps += 1
-
-    print(f"Completed {steps} steps; exiting.")
+    if not controlled_units:
+        print(f"No active units remain after {steps} steps ({turns} turns); exiting.")
+    else:
+        print(f"Completed {steps} steps across {turns} turns; exiting.")
 
 
 if __name__ == "__main__":
