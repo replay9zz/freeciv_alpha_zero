@@ -14,6 +14,7 @@ try:
     from freeciv_rl.freeciv_movement import FreecivMovement  # type: ignore
     from freeciv_rl.lua_helper import (  # type: ignore
         list_all_units,
+        list_all_cities,
         list_visible_tiles_call,
         parse_position_result,
         parse_vision_tiles,
@@ -31,6 +32,7 @@ except Exception:
         from freeciv_rl.freeciv_movement import FreecivMovement  # type: ignore
         from freeciv_rl.lua_helper import (  # type: ignore
             list_all_units,
+            list_all_cities,
             list_visible_tiles_call,
             parse_position_result,
             parse_vision_tiles,
@@ -57,6 +59,9 @@ class Snapshot:
     player_pos: Tuple[int, int]
     enemy_pos: Tuple[int, int]
     status_lookup: Dict[Tuple[int, int], Tuple[str, bool, bool, bool]]
+
+
+PRODUCTION_UNIT_NAME = "Thanos"
 
 
 def chunked(seq: Iterable[Tuple[int, int]], size: int) -> Iterable[List[Tuple[int, int]]]:
@@ -91,6 +96,23 @@ def discover_controlled_units(
 
     controlled = [uid for uid, _x, _y, unit_owner in units if unit_owner == player_id]
     return controlled, player_id
+
+
+def discover_player_cities(
+    client: LuaRemoteClient,
+    player_id: Optional[int],
+) -> List[Tuple[int, int, int]]:
+    if player_id is None:
+        return []
+    try:
+        cities = list_all_cities(client)
+    except Exception:
+        return []
+    owned: List[Tuple[int, int, int]] = []
+    for cid, cx, cy, owner, _name in cities:
+        if owner == player_id:
+            owned.append((cid, cx, cy))
+    return owned
 
 
 def build_state(cfg: MapConfig, snapshot: Snapshot) -> FreecivBoardState:
@@ -319,6 +341,32 @@ def main() -> None:
     ap.add_argument('--dir-ids', default='0,1,4,7,6,3')
     ap.add_argument('--sleep', type=float, default=0.1)
     ap.add_argument('--max-steps', type=int, default=200)
+    ap.add_argument(
+        '--auto-build-city',
+        dest='auto_build_city',
+        action='store_true',
+        help='Attempt to found a city when none exists for the player.',
+    )
+    ap.add_argument(
+        '--no-auto-build-city',
+        dest='auto_build_city',
+        action='store_false',
+        help='Disable automatic city founding.',
+    )
+    ap.set_defaults(auto_build_city=True)
+    ap.add_argument(
+        '--auto-queue-thanos',
+        dest='auto_queue_thanos',
+        action='store_true',
+        help=f'Automatically set city production to {PRODUCTION_UNIT_NAME}.',
+    )
+    ap.add_argument(
+        '--no-auto-queue-thanos',
+        dest='auto_queue_thanos',
+        action='store_false',
+        help='Disable automatic production queueing.',
+    )
+    ap.set_defaults(auto_queue_thanos=True)
     args = ap.parse_args()
 
     checkpoint_path = Path(args.checkpoint).expanduser()
@@ -355,10 +403,25 @@ def main() -> None:
     known_enemy: Dict[Tuple[int, int], bool] = {}
     visited_tiles: Set[Tuple[int, int]] = set()
     previous_pos: Dict[int, Optional[Tuple[int, int]]] = {uid: None for uid in controlled_units}
+    owned_cities = discover_player_cities(client, player_id)
+    queued_city_production: Set[int] = set()
 
     steps = 0
     turns = 0
-    while steps < args.max_steps and controlled_units:
+    while steps < args.max_steps:
+        if not controlled_units:
+            if player_id is not None:
+                refreshed_units, player_id = discover_controlled_units(client, player_id)
+                if refreshed_units:
+                    controlled_units.extend(refreshed_units)
+                    for uid in refreshed_units:
+                        previous_pos[uid] = None
+            if not controlled_units:
+                if owned_cities:
+                    time.sleep(args.sleep)
+                    turns += 1
+                    continue
+                break
         acted_this_turn = False
         for unit_id in list(controlled_units):
             if steps >= args.max_steps:
@@ -380,6 +443,34 @@ def main() -> None:
                 previous_pos.pop(unit_id, None)
                 continue
             visited_tiles.add(snapshot.player_pos)
+
+            if args.auto_build_city and not owned_cities:
+                built = client.build_city(unit_id)
+                if built:
+                    print(f"[step {steps}] unit={unit_id} built a city")
+                    owned_cities = discover_player_cities(client, player_id)
+                    if args.auto_queue_thanos:
+                        for cid, _cx, _cy in owned_cities:
+                            if cid not in queued_city_production:
+                                queued = client.set_city_production(cid, "UnitType", PRODUCTION_UNIT_NAME)
+                                print(f"[step {steps}] queued {PRODUCTION_UNIT_NAME} in city {cid} success={queued}")
+                                if queued:
+                                    queued_city_production.add(cid)
+                    controlled_units.remove(unit_id)
+                    previous_pos.pop(unit_id, None)
+                    time.sleep(args.sleep)
+                    steps += 1
+                    acted_this_turn = True
+                    continue
+
+            if args.auto_queue_thanos and owned_cities:
+                for cid, _cx, _cy in owned_cities:
+                    if cid in queued_city_production:
+                        continue
+                    queued = client.set_city_production(cid, "UnitType", PRODUCTION_UNIT_NAME)
+                    print(f"[step {steps}] queued {PRODUCTION_UNIT_NAME} in city {cid} success={queued}")
+                    if queued:
+                        queued_city_production.add(cid)
 
             # Attempt to attack immediately if an enemy unit is adjacent.
             px, py = snapshot.player_pos
@@ -437,6 +528,26 @@ def main() -> None:
         turns += 1
         if not acted_this_turn:
             time.sleep(args.sleep)
+
+        if player_id is not None:
+            latest_units, player_id = discover_controlled_units(client, player_id)
+            for uid in latest_units:
+                if uid not in controlled_units:
+                    controlled_units.append(uid)
+                    previous_pos[uid] = None
+            for uid in list(controlled_units):
+                if uid not in latest_units:
+                    controlled_units.remove(uid)
+                    previous_pos.pop(uid, None)
+        owned_cities = discover_player_cities(client, player_id)
+        if args.auto_queue_thanos and owned_cities:
+            for cid, _cx, _cy in owned_cities:
+                if cid in queued_city_production:
+                    continue
+                queued = client.set_city_production(cid, "UnitType", PRODUCTION_UNIT_NAME)
+                print(f"[turn {turns}] queued {PRODUCTION_UNIT_NAME} in city {cid} success={queued}")
+                if queued:
+                    queued_city_production.add(cid)
 
     if not controlled_units:
         print(f"No active units remain after {steps} steps ({turns} turns); exiting.")
