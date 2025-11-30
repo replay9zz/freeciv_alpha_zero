@@ -101,7 +101,65 @@ class NNetWrapper(NeuralNet):
             raise FileNotFoundError(f"No model in path {filepath}")
         map_location = None if nnet_args.cuda else 'cpu'
         checkpoint = torch.load(filepath, map_location=map_location, weights_only=True)
-        self.nnet.load_state_dict(checkpoint['state_dict'])
+        state_dict = checkpoint['state_dict']
+        aligned_state = self._align_state_dict_shapes(state_dict)
+        self.nnet.load_state_dict(aligned_state)
+
+    def _align_state_dict_shapes(self, state_dict):
+        """
+        Some older checkpoints were trained before additional input channels and actions were added.
+        To keep those checkpoints usable, we expand their tensors to the current shapes and let
+        the new positions fall back to the freshly-initialized weights.
+        """
+        model_state = self.nnet.state_dict()
+        updated = dict(state_dict)
+        notes = []
+
+        # Expand first conv layer if checkpoint has fewer input channels.
+        if 'conv1.weight' in state_dict:
+            ck = state_dict['conv1.weight']
+            tgt = model_state['conv1.weight']
+            if ck.shape != tgt.shape:
+                if (
+                    ck.shape[0] == tgt.shape[0]
+                    and ck.shape[2:] == tgt.shape[2:]
+                    and ck.shape[1] <= tgt.shape[1]
+                ):
+                    new_w = tgt.clone()
+                    new_w[:, :ck.shape[1], :, :] = ck
+                    updated['conv1.weight'] = new_w
+                    notes.append(f"conv1.weight {ck.shape} -> {tgt.shape}")
+                else:
+                    raise RuntimeError(f"Incompatible conv1.weight shape: checkpoint {ck.shape}, expected {tgt.shape}")
+
+        # Expand policy head outputs when the checkpoint had fewer actions.
+        if 'policy_head.weight' in state_dict:
+            ck = state_dict['policy_head.weight']
+            tgt = model_state['policy_head.weight']
+            if ck.shape != tgt.shape:
+                if ck.shape[1] == tgt.shape[1] and ck.shape[0] <= tgt.shape[0]:
+                    new_w = tgt.clone()
+                    new_w[:ck.shape[0], :] = ck
+                    updated['policy_head.weight'] = new_w
+                    notes.append(f"policy_head.weight {ck.shape} -> {tgt.shape}")
+                else:
+                    raise RuntimeError(f"Incompatible policy_head.weight shape: checkpoint {ck.shape}, expected {tgt.shape}")
+
+        if 'policy_head.bias' in state_dict:
+            ck = state_dict['policy_head.bias']
+            tgt = model_state['policy_head.bias']
+            if ck.shape != tgt.shape:
+                if ck.shape[0] <= tgt.shape[0]:
+                    new_b = tgt.clone()
+                    new_b[:ck.shape[0]] = ck
+                    updated['policy_head.bias'] = new_b
+                    notes.append(f"policy_head.bias {ck.shape} -> {tgt.shape}")
+                else:
+                    raise RuntimeError(f"Incompatible policy_head.bias shape: checkpoint {ck.shape}, expected {tgt.shape}")
+
+        if notes:
+            print("Adjusted checkpoint for newer model shape:", "; ".join(notes))
+        return updated
 
     # ---- helpers ----
     def _board_to_np(self, board) -> np.ndarray:

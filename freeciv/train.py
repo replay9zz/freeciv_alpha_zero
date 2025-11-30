@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import argparse
+import time
 
 try:
     from freeciv_alpha_zero.Coach import Coach  # type: ignore
@@ -32,8 +33,14 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument('--stats-path', default=None)
     return parser.parse_args()
 
+def format_duration(seconds: float) -> str:
+    days, rem = divmod(float(seconds), 86400)
+    hours, rem = divmod(rem, 3600)
+    minutes, secs = divmod(rem, 60)
+    return f"{int(days):02}d {int(hours):02}:{int(minutes):02}:{secs:05.2f}"
 
 def main():
+    start_time = time.perf_counter()
     args = parse_args()
     map_cfg = MapConfig(map_w=args.map_width, map_h=args.map_height, max_turns=args.max_turns)
     provider = RandomMapProvider(map_cfg.map_w, map_cfg.map_h, enemy_density=args.enemy_density)
@@ -65,6 +72,8 @@ def main():
         coach.loadTrainExamples()
 
     coach.learn()
+    elapsed = time.perf_counter() - start_time
+    print(f"Total runtime: {format_duration(elapsed)}")
 
 
 if __name__ == "__main__":
