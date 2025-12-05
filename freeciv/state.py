@@ -9,6 +9,7 @@ from freeciv_rl.freeciv_movement import FreecivMovement
 
 from .config import MapConfig
 from .providers import BaseProvider, GroundTruth
+from .research_policy import RESEARCH_TECHS, TARGET_TECH_NAME
 
 Player = int  # 1 or -1
 Coord = Tuple[int, int]
@@ -38,8 +39,8 @@ class FreecivBoardState:
     SETTLER_MOVE_COUNT = 6
     BUILD_CITY_ACTION = SETTLER_MOVE_COUNT
     PRODUCE_THANOS_ACTION = BUILD_CITY_ACTION + 1
-    TARGET_TECH_NAME = "The Blip"
-    RESEARCH_TECHS: Tuple[str, ...] = (TARGET_TECH_NAME, "Generic Tech")
+    TARGET_TECH_NAME = TARGET_TECH_NAME
+    RESEARCH_TECHS: Tuple[str, ...] = RESEARCH_TECHS
     RESEARCH_ACTION_BASE = PRODUCE_THANOS_ACTION + 1
     RESEARCH_ACTION_COUNT = len(RESEARCH_TECHS)
     THANOS_MOVE_BASE = RESEARCH_ACTION_BASE + RESEARCH_ACTION_COUNT
@@ -192,14 +193,10 @@ class FreecivBoardState:
         ):
             moves[self.PRODUCE_THANOS_ACTION] = 1
 
-        # Research action (one-time) gated on having a city
+        # Research action (one-time per tech) gated on having a city
         if has_city:
-            target_done = self.research_done[player].get(self.TARGET_TECH_NAME, False)
             for idx, tech in enumerate(self.RESEARCH_TECHS):
                 if self.research_done[player].get(tech, False):
-                    continue
-                # Force The Blip first: until it is done, only allow that tech.
-                if not target_done and tech != self.TARGET_TECH_NAME:
                     continue
                 moves[self.RESEARCH_ACTION_BASE + idx] = 1
 

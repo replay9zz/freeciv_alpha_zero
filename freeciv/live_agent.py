@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import argparse
-import math
 import time
 from dataclasses import dataclass, field
 import random
@@ -57,8 +56,12 @@ from freeciv_alpha_zero.freeciv.game import CanonicalBoard, FreecivGame
 from freeciv_alpha_zero.freeciv.nnet import NNetWrapper
 from freeciv_alpha_zero.freeciv.providers import GroundTruth
 from freeciv_alpha_zero.freeciv.state import FreecivBoardState
+from freeciv_alpha_zero.freeciv.research_policy import TARGET_TECH_NAME
+from freeciv_alpha_zero.freeciv.explore_policy import (
+    choose_action,
+    fallback_move_direction,
+)
 
-TARGET_TECH_NAME = "The Blip"
 PRODUCTION_UNIT_NAME = "Thanos"
 
 
@@ -334,123 +337,49 @@ def gather_snapshot(
     return snapshot, player_id
 
 
-def choose_action(
-    snapshot: Snapshot,
-    pi: np.ndarray,
-    action_size: int,
-    movement: FreecivMovement,
-    visited_tiles: Set[Tuple[int, int]],
-    previous_pos: Optional[Tuple[int, int]],
-    valid_actions: Optional[np.ndarray] = None,
-) -> int:
-    px, py = snapshot.player_pos
-    neighbors = movement.get_native_neighbors(px, py)
-    mask = np.ones(action_size, dtype=np.float32)
-
-    for idx, (nx, ny) in enumerate(neighbors):
-        if nx is None or ny is None:
-            mask[idx] = 0.0
-            continue
-        status = snapshot.status_lookup.get((nx, ny))
-        if not status:
-            mask[idx] = 0.0
-            continue
-        au_char, enemy_flag, enemy_units, friendly_units = status
-        # Allow stepping onto any ally or unknown tile; enemy presence is attackable, friendly stacking allowed.
-        if au_char in ('A', 'U') or enemy_units or enemy_flag:
-            mask[idx] = 1.0
-        else:
-            mask[idx] = 0.0
-
-    neighbor_indices = list(range(len(neighbors)))
-    non_pass_indices = [idx for idx in neighbor_indices if mask[idx] > 0]
-
-    # 1) Prefer avoiding immediate backtracking when another move exists.
-    if previous_pos is not None:
-        backtrack_indices = [
-            idx for idx, (nx, ny) in enumerate(neighbors)
-            if (nx, ny) == previous_pos and mask[idx] > 0
-        ]
-        if len(non_pass_indices) > len(backtrack_indices):
-            for idx in backtrack_indices:
-                mask[idx] *= 0.2  # demote but still allow backtracking when necessary
-
-    # 2) Prefer unvisited tiles if any remain legal.
-    has_unvisited = False
-    visited_indices: List[int] = []
-    for idx, (nx, ny) in enumerate(neighbors):
-        if mask[idx] <= 0:
-            continue
-        if (nx, ny) not in visited_tiles:
-            has_unvisited = True
-        else:
-            visited_indices.append(idx)
-    if has_unvisited:
-        for idx in visited_indices:
-            mask[idx] *= 0.5  # allow revisiting but prefer unexplored tiles
-
-    # 3) Only prefer pass when no other moves exist.
-    if any(mask[idx] > 0 for idx in neighbor_indices):
-        mask[-1] *= 0.1
-
-    if valid_actions is not None:
-        mask *= valid_actions.astype(np.float32)
-
-    masked = pi * mask
-    total = masked.sum()
-    if not math.isfinite(total) or total <= 1e-6:
-        return action_size - 1
-
-    return int(np.argmax(masked))
-
-
-def fallback_move_direction(
-    snapshot: Snapshot,
-    movement: FreecivMovement,
-    previous_pos: Optional[Tuple[int, int]],
-    dir_ids: List[int],
-) -> Optional[int]:
-    """
-    Simple greedy fallback: prefer enemy tiles, then unexplored, then allied tiles,
-    avoiding immediate backtracking when possible.
-    """
-    px, py = snapshot.player_pos
-    neighbors = movement.get_native_neighbors(px, py)
-    candidates: List[Tuple[float, int]] = []
-    for idx, (nx, ny) in enumerate(neighbors):
-        if nx is None or ny is None:
-            continue
-        status = snapshot.status_lookup.get((nx, ny))
-        if not status:
-            continue
-        au_char, enemy_flag, enemy_units, friendly_units = status
-        score = -1.0
-        if enemy_units or enemy_flag:
-            score = 3.0  # attack priority
-        elif au_char == 'U':
-            score = 2.0
-        elif au_char == 'A':
-            score = 1.0
-        else:
-            continue
-        if previous_pos is not None and (nx, ny) == previous_pos:
-            score -= 0.4
-        if friendly_units:
-            score -= 0.1  # allow stacking but prefer emptier tiles
-        candidates.append((score, idx))
-
-    if not candidates:
-        return None
-    candidates.sort(key=lambda x: x[0], reverse=True)
-    _, best_idx = candidates[0]
-    return dir_ids[best_idx]
-
-
 def parse_dir_ids(raw: str) -> List[int]:
     parts = [s.strip() for s in raw.split(',') if s.strip()]
     if len(parts) != 6:
         raise ValueError("Expected 6 comma-separated direction ids for [N,NE,SE,S,SW,NW]")
     return [int(p) for p in parts]
+
+
+def parse_tech_weights(raw_values: List[str]) -> Dict[str, float]:
+    """
+    Parse tech weight strings like ["Iron Working=2.0", "Masonry=0.5,Alphabet=1.2"].
+    """
+    weights: Dict[str, float] = {}
+    for entry in raw_values:
+        for chunk in entry.split(','):
+            if not chunk.strip():
+                continue
+            if '=' not in chunk:
+                print(f"[tech-weight] skipping invalid entry (expected name=weight): '{chunk}'")
+                continue
+            name, sval = chunk.split('=', 1)
+            try:
+                weights[name.strip()] = float(sval.strip())
+            except ValueError:
+                print(f"[tech-weight] skipping non-numeric weight for '{name}': '{sval}'")
+    return weights
+
+
+def apply_tech_weights(pi: np.ndarray, board_state: FreecivBoardState, weights: Dict[str, float]) -> np.ndarray:
+    """
+    Apply optional multiplicative weights to research actions in the policy vector.
+    """
+    if not weights:
+        return pi
+    weighted = pi.copy()
+    base = board_state.RESEARCH_ACTION_BASE
+    for idx, tech_name in enumerate(board_state.RESEARCH_TECHS):
+        weight = weights.get(tech_name)
+        if weight is None:
+            continue
+        action_idx = base + idx
+        if action_idx < len(weighted):
+            weighted[action_idx] *= weight
+    return weighted
 
 
 def load_network(checkpoint: Path, map_cfg: MapConfig) -> NNetWrapper:
@@ -479,9 +408,16 @@ def main() -> None:
     ap.add_argument('--map-width', type=int, default=9)
     ap.add_argument('--map-height', type=int, default=9)
     ap.add_argument('--max-turns', type=int, default=64)
-    ap.add_argument('--dir-ids', default='0,1,4,7,6,3')
+    ap.add_argument('--dir-ids', default='1,2,7,6,5,0')
     ap.add_argument('--sleep', type=float, default=0.1)
     ap.add_argument('--max-steps', type=int, default=200)
+    ap.add_argument(
+        '--tech-weight',
+        action='append',
+        default=[],
+        help="Apply weight multipliers to tech research actions (format: Name=weight,Name2=weight2). "
+             "May be specified multiple times.",
+    )
     args = ap.parse_args()
 
     checkpoint_path = Path(args.checkpoint).expanduser()
@@ -489,6 +425,7 @@ def main() -> None:
         raise SystemExit(f"Checkpoint file {checkpoint_path} not found.")
 
     dir_ids = parse_dir_ids(args.dir_ids)
+    tech_weights = parse_tech_weights(args.tech_weight)
     map_cfg = MapConfig(map_w=args.map_width, map_h=args.map_height, max_turns=args.max_turns)
     nnet = load_network(checkpoint_path, map_cfg)
 
@@ -653,6 +590,7 @@ def main() -> None:
             board_state = build_state(map_cfg, snapshot)
             canonical = CanonicalBoard(board_state, 1)
             pi, _value = nnet.predict(canonical)
+            pi = apply_tech_weights(pi, board_state, tech_weights)
             valid_actions = board_state.valid_moves(1)
             action = choose_action(
                 snapshot,

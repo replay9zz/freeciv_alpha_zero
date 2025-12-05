@@ -20,11 +20,14 @@ except ModuleNotFoundError:  # pragma: no cover
 
 from .game import CanonicalBoard
 
+force_cpu = os.environ.get("FREECIV_FORCE_CPU", "").strip()
+use_cuda = torch.cuda.is_available() and not force_cpu
+
 nnet_args = dotdict({
     'lr': 1e-3,
     'epochs': 10,
     'batch_size': 64,
-    'cuda': torch.cuda.is_available(),
+    'cuda': use_cuda,
     'num_channels': 64,
 })
 
@@ -37,10 +40,14 @@ class NNetWrapper(NeuralNet):
         self.action_size = game.getActionSize()
         if nnet_args.cuda:
             self.nnet.cuda()
+            print("[nnet] Using CUDA")
+        else:
+            print("[nnet] Using CPU")
 
     # ---- API ----
     def train(self, examples: List[Tuple[object, np.ndarray, float]]):
         optimizer = optim.Adam(self.nnet.parameters(), lr=nnet_args.lr)
+        print(f"[nnet] Train start: epochs={nnet_args.epochs}, batches_per_epoch={max(1, len(examples) // nnet_args.batch_size)}")
 
         for epoch in range(nnet_args.epochs):
             self.nnet.train()
