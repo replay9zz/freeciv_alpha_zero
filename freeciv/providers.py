@@ -45,17 +45,15 @@ class RandomMapProvider(BaseProvider):
         height: int,
         *,
         p_open: float = 0.85,
-        enemy_density: float = 0.0,
         rng: Optional[np.random.Generator] = None,
     ):
         super().__init__(width, height)
         self.p_open = p_open
-        self.enemy_density = enemy_density
         self.rng = rng or np.random.default_rng()
 
     def resample(self) -> GroundTruth:
         au = np.where(self.rng.random((self.height, self.width)) < self.p_open, 'A', 'U')
-        enemy = self.rng.random((self.height, self.width)) < self.enemy_density
+        enemy = np.zeros((self.height, self.width), dtype=bool)
         return GroundTruth(au.astype('<U1'), enemy)
 
 

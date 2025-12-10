@@ -22,6 +22,61 @@ from .research_policy import (
     reward_map_from_goals,
 )
 
+# ----------------------------------------------------------------------
+# Tech unlock loading
+# ----------------------------------------------------------------------
+def load_tech_unlocks(path: str) -> list[dict]:
+    try:
+        import yaml  # type: ignore
+    except Exception as exc:  # pragma: no cover - optional dep
+        raise RuntimeError("PyYAML is required to load tech_unlocks.yaml") from exc
+
+    from pathlib import Path
+
+    p = Path(path)
+    if not p.exists():
+        raise FileNotFoundError(f"tech unlocks file not found: {p}")
+    with p.open("r", encoding="utf-8") as f:
+        data = yaml.safe_load(f)
+    if not isinstance(data, list):
+        raise ValueError("tech unlocks file must be a list of tech entries")
+    return data
+
+
+def unit_value(entry: dict) -> float:
+    """Rough value score for a unit."""
+    atk = float(entry.get("attack", 0))
+    df = float(entry.get("defense", 0))
+    hp = float(entry.get("hp", 1))
+    cost = max(float(entry.get("cost", 1)), 1.0)
+    return (atk + df) * hp / cost
+
+
+def building_value(entry: dict) -> float:
+    """Flat value for a building; cheap heuristic."""
+    base = 0.5
+    cost = max(float(entry.get("cost", 1)), 1.0)
+    return base * (cost / 30.0)
+
+
+def reward_map_from_unlocks(unlocks: list[dict], base_reward: float) -> dict[str, float]:
+    values: dict[str, float] = {}
+    for item in unlocks:
+        tech = item.get("tech")
+        if not tech:
+            continue
+        entries = item.get("unlocks", [])
+        val = 0.0
+        for ent in entries:
+            kind = ent.get("kind")
+            if kind == "unit":
+                val += unit_value(ent)
+            elif kind == "building":
+                val += building_value(ent)
+        # scale by base_reward to keep magnitude similar
+        values[tech] = base_reward * (1.0 + val)
+    return values
+
 
 def parse_args() -> argparse.Namespace:
     logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
@@ -34,7 +89,6 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument('--num-mcts-sims', type=int, default=64)
     parser.add_argument('--arena-compare', type=int, default=10)
     parser.add_argument('--checkpoint', default='temp/fcaz', help='Directory for checkpoints')
-    parser.add_argument('--enemy-density', type=float, default=0.0, help='Probability of trap tiles in random maps')
     parser.add_argument('--load-model', action='store_true')
     parser.add_argument('--load-folder', default=None)
     parser.add_argument('--load-file', default=None)
@@ -52,17 +106,26 @@ def main():
     args = parse_args()
     logging.info("Starting training with args: %s", args)
     map_cfg = MapConfig(map_w=args.map_width, map_h=args.map_height, max_turns=args.max_turns)
-    # Boost research rewards toward the default target tech to ensure research appears during training.
-    logging.info("Building research reward map for target tech %s", TARGET_TECH_NAME)
-    logging.info("Using TECH_CHILD_INHERITANCE: %s", TECH_CHILD_INHERITANCE.get(TARGET_TECH_NAME, {}))
-    map_cfg.research_reward_map = reward_map_from_goals(
-        {TARGET_TECH_NAME: 1.0},
-        base_reward=map_cfg.research_reward,
-        prereqs=TECH_PREREQS,
-        child_ratios=TECH_CHILD_INHERITANCE,
-    )
-    logging.info("Research reward map built: %s", map_cfg.research_reward_map)
-    provider = RandomMapProvider(map_cfg.map_w, map_cfg.map_h, enemy_density=args.enemy_density)
+    # Build research rewards from unlock values (ruleset-derived YAML)
+    try:
+        unlock_path = Path(__file__).resolve().parent / "data" / "tech_unlocks.yaml"
+        unlocks = load_tech_unlocks(unlock_path)
+        unlock_reward_map = reward_map_from_unlocks(unlocks, base_reward=map_cfg.research_reward)
+        map_cfg.research_reward_map = unlock_reward_map
+        logging.info("Loaded tech unlocks from %s", unlock_path)
+        logging.info("Research reward map (unlock-derived): %s", map_cfg.research_reward_map)
+    except Exception as exc:
+        logging.warning("Failed to load tech unlocks; falling back to goal propagation: %s", exc)
+        logging.info("Building research reward map for target tech %s", TARGET_TECH_NAME)
+        logging.info("Using TECH_CHILD_INHERITANCE: %s", TECH_CHILD_INHERITANCE.get(TARGET_TECH_NAME, {}))
+        map_cfg.research_reward_map = reward_map_from_goals(
+            {TARGET_TECH_NAME: 1.0},
+            base_reward=map_cfg.research_reward,
+            prereqs=TECH_PREREQS,
+            child_ratios=TECH_CHILD_INHERITANCE,
+        )
+        logging.info("Research reward map built: %s", map_cfg.research_reward_map)
+    provider = RandomMapProvider(map_cfg.map_w, map_cfg.map_h)
     game = FreecivGame(map_cfg, provider)
     nnet = NNetWrapper(game)
 

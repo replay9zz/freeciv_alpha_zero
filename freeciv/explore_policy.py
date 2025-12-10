@@ -32,7 +32,7 @@ def choose_action(
         if not status:
             mask[idx] = 0.0
             continue
-        au_char, enemy_flag, enemy_units, friendly_units = status
+        au_char, enemy_flag, enemy_units, friendly_units, *_rest = status
         # Allow stepping onto any ally or unknown tile; enemy presence is attackable, friendly stacking allowed.
         if au_char in ('A', 'U') or enemy_units or enemy_flag:
             mask[idx] = 1.0
@@ -100,7 +100,7 @@ def fallback_move_direction(
         status = snapshot.status_lookup.get((nx, ny))
         if status is None:
             continue
-        _au_char, enemy_flag, enemy_units, _friendly_units = status
+        _au_char, enemy_flag, enemy_units, _friendly_units, *_rest = status
         score = 0.0
         if enemy_flag or enemy_units:
             score += 2.0

@@ -52,6 +52,7 @@ except Exception:
         ) from exc
 
 from freeciv_alpha_zero.freeciv.config import MapConfig
+from freeciv_alpha_zero.freeciv.train import load_tech_unlocks, unit_value
 from freeciv_alpha_zero.freeciv.game import CanonicalBoard, FreecivGame
 from freeciv_alpha_zero.freeciv.nnet import NNetWrapper
 from freeciv_alpha_zero.freeciv.providers import GroundTruth
@@ -61,8 +62,6 @@ from freeciv_alpha_zero.freeciv.explore_policy import (
     choose_action,
     fallback_move_direction,
 )
-
-PRODUCTION_UNIT_NAME = "Thanos"
 
 
 def format_unit_label(unit_id: int, unit_types: Dict[int, str]) -> str:
@@ -82,7 +81,8 @@ class Snapshot:
     revealed: np.ndarray
     player_pos: Tuple[int, int]
     enemy_pos: Tuple[int, int]
-    status_lookup: Dict[Tuple[int, int], Tuple[str, bool, bool, bool]]
+    # (A/U, enemy_flag, enemy_units, friendly_units, has_walls?)
+    status_lookup: Dict[Tuple[int, int], Tuple[str, bool, bool, bool, bool]]
     research_name: Optional[str] = None
     research_done: bool = False
     research_flags: Dict[str, bool] = field(default_factory=dict)
@@ -97,6 +97,26 @@ def chunked(seq: Iterable[Tuple[int, int]], size: int) -> Iterable[List[Tuple[in
             bucket = []
     if bucket:
         yield bucket
+
+
+def simple_knows_tech(client: LuaRemoteClient, player_id: int, tech_name: str) -> bool:
+    """
+    Minimal knows_tech check by name to avoid helper mis-detections.
+    """
+    lua = (
+        "return (function() "
+        f"local pl = find.player and find.player({player_id}); "
+        f"local t = find.tech_type and find.tech_type('{tech_name}'); "
+        "if pl and t and pl.knows_tech and pl:knows_tech(t) then return '__YES__' end; "
+        "return '__NO__' "
+        "end)()"
+    )
+    try:
+        res = client.eval(lua)
+        ret = res.last_return() if res else None
+        return isinstance(ret, str) and '__YES__' in ret
+    except Exception:
+        return False
 
 
 def discover_controlled_units(
@@ -139,22 +159,91 @@ def discover_player_cities(
     return owned
 
 
-def queue_city_production(client: LuaRemoteClient, city_id: int) -> bool:
+def load_unit_values(path: str) -> Dict[str, Tuple[str, float]]:
     """
-    Set production to the target unit by display name.
+    Load unit values from tech unlocks file.
+    Returns mapping unit_name -> (required_tech or None, value_score)
     """
-    return client.set_city_production(city_id, "UnitType", PRODUCTION_UNIT_NAME)
+    unlocks = load_tech_unlocks(path)
+    out: Dict[str, Tuple[str, float]] = {}
+    for item in unlocks:
+        tech = item.get("tech")
+        for ent in item.get("unlocks", []):
+            if ent.get("kind") != "unit":
+                continue
+            name = ent.get("name")
+            if not name:
+                continue
+            val = unit_value(ent)
+            out[name] = (tech, val)
+    return out
+
+
+def pick_production_target(research_flags: Dict[str, bool], unit_values: Dict[str, Tuple[str, float]]) -> str:
+    """
+    Choose the highest-value unlocked unit given known techs.
+    Falls back to Warriors if nothing else is unlocked.
+    """
+    best_name = "Warriors"
+    best_val = -1.0
+    for name, (req_tech, val) in unit_values.items():
+        if req_tech and not research_flags.get(req_tech, False):
+            continue
+        if val > best_val:
+            best_name = name
+            best_val = val
+    return best_name
+
+
+def queue_city_production(
+    client: LuaRemoteClient,
+    city_id: int,
+    research_flags: Dict[str, bool],
+    unit_values: Optional[Dict[str, Tuple[str, float]]] = None,
+) -> bool:
+    """
+    Set production to the best unlocked unit (prefers stronger tech-gated units).
+    """
+    if not unit_values:
+        target_name = pick_production_target(research_flags, {})
+        print(f"[production] unit values unavailable; defaulting to {target_name}")
+    else:
+        target_name = pick_production_target(research_flags, unit_values)
+        print(f"[production] choose {target_name} (unlocked={research_flags.get(unit_values.get(target_name, ('',0))[0], True)})")
+    return client.set_city_production(city_id, "UnitType", target_name)
 
 
 def set_research_to_target(
     client: LuaRemoteClient,
     player_id: Optional[int],
-    tech_name: str = TARGET_TECH_NAME,
+    research_flags: Optional[Dict[str, bool]] = None,
+    tech_name: Optional[str] = None,
 ) -> bool:
     if player_id is None:
         return False
+    # Pick a tech considering prereqs for the main goal.
+    if tech_name is None:
+        flags = research_flags or {}
+        if not flags.get(TARGET_TECH_NAME, False):
+            # Prioritize Warrior Code -> Bronze Working -> Iron Working.
+            if not flags.get("Warrior Code", False):
+                tech_name = "Warrior Code"
+            elif not flags.get("Bronze Working", False):
+                tech_name = "Bronze Working"
+            else:
+                tech_name = TARGET_TECH_NAME
+        else:
+            tech_name = TARGET_TECH_NAME
     try:
-        return set_player_research(client, player_id, tech_name)
+        ok = set_player_research(client, player_id, tech_name)
+        # Log what actually got set after the request.
+        actual = None
+        try:
+            actual = get_player_research(client, player_id)
+        except Exception:
+            actual = None
+        print(f"[research] request={tech_name} actual={actual} success={ok}")
+        return ok
     except Exception:
         return False
 
@@ -197,9 +286,6 @@ def build_state(cfg: MapConfig, snapshot: Snapshot) -> FreecivBoardState:
     state.scores = {1: 0.0, -1: 0.0}
     state.prev_positions = {1: None, -1: None}
     state.cities = {1: None, -1: None}
-    state.production_remaining = {1: -1, -1: -1}
-    state.thanos_units = {1: None, -1: None}
-    state.thanos_prev_positions = {1: None, -1: None}
     state.research_done = {
         1: {tech: snapshot.research_flags.get(tech, False) for tech in FreecivBoardState.RESEARCH_TECHS},
         -1: {tech: False for tech in FreecivBoardState.RESEARCH_TECHS},
@@ -237,7 +323,18 @@ def gather_snapshot(
     research_flags: Dict[str, bool] = {tech: False for tech in FreecivBoardState.RESEARCH_TECHS}
     if player_id is not None:
         try:
-            research_name = get_player_research(client, player_id)
+            # Use a direct call to avoid mis-detection
+            research_name = client.eval(
+                "return (function() "
+                f"local pl = find.player and find.player({player_id}); "
+                "if not pl or not pl.researching then return '__NORESEARCH__' end; "
+                "local ok, tech = pcall(function() return pl:researching() end); "
+                "if not ok or not tech then return '__NORESEARCH__' end; "
+                "local ok2, name = pcall(function() return tech:rule_name() end); "
+                "if ok2 and name and name ~= '' then return '__TECH__ '..name end; "
+                "return '__NORESEARCH__' "
+                "end)()"
+            ).last_return()
         except Exception:
             research_name = None
         try:
@@ -246,13 +343,13 @@ def gather_snapshot(
             research_done = False
         for tech in FreecivBoardState.RESEARCH_TECHS:
             try:
-                research_flags[tech] = player_knows_tech(client, player_id, tech)
+                research_flags[tech] = simple_knows_tech(client, player_id, tech)
             except Exception:
                 continue
         research_done = research_flags.get(TARGET_TECH_NAME, research_done)
 
     visible_tiles: Set[Tuple[int, int]] = set()
-    status_lookup: Dict[Tuple[int, int], Tuple[str, bool, bool, bool]] = {}
+    status_lookup: Dict[Tuple[int, int], Tuple[str, bool, bool, bool, bool]] = {}
 
     if player_id is not None:
         try:
@@ -277,16 +374,23 @@ def gather_snapshot(
         for entry in batch_status:
             if len(entry) < 7:
                 continue
-            nx, ny, au_char, enemy_flag, _terrain, enemy_units, friendly_units = entry
+            nx, ny, au_char, enemy_flag, _terrain, enemy_units, friendly_units = entry[:7]
+            has_walls = False
+            if len(entry) > 7:
+                has_walls = bool(entry[7])
             status_lookup[(nx, ny)] = (
                 au_char,
                 bool(enemy_flag),
                 bool(enemy_units),
                 bool(friendly_units),
+                has_walls,
             )
 
     for coord, status in status_lookup.items():
-        au_char, enemy_flag, enemy_units, friendly_units = status
+        if not status:
+            continue
+        # status may include has_walls at the end; we only care about the first four here.
+        au_char, enemy_flag, enemy_units, friendly_units = status[:4]
         if au_char:
             known_tiles[coord] = au_char
         if enemy_flag or enemy_units:
@@ -408,7 +512,9 @@ def main() -> None:
     ap.add_argument('--map-width', type=int, default=9)
     ap.add_argument('--map-height', type=int, default=9)
     ap.add_argument('--max-turns', type=int, default=64)
-    ap.add_argument('--dir-ids', default='1,2,7,6,5,0')
+    # Default hex dir ids align with the mapping used in freeciv_rl.run_model_agent:
+    # [N, NE, SE, S, SW, NW] -> [0, 1, 4, 7, 6, 3]
+    ap.add_argument('--dir-ids', default='0,1,4,7,6,3')
     ap.add_argument('--sleep', type=float, default=0.1)
     ap.add_argument('--max-steps', type=int, default=200)
     ap.add_argument(
@@ -464,6 +570,16 @@ def main() -> None:
     owned_cities = discover_player_cities(client, player_id)
     queued_city_production: Set[int] = set()
     research_confirmed_complete = False
+    last_research_flags: Dict[str, bool] = {}
+
+    # Preload unlock values for production selection
+    unlock_path = Path(__file__).resolve().parent / "data" / "tech_unlocks.yaml"
+    try:
+        unit_values = load_unit_values(unlock_path)
+        print(f"[config] loaded {len(unit_values)} unit values from {unlock_path}")
+    except Exception as exc:
+        unit_values = {}
+        print(f"[config] failed to load unit values from {unlock_path}: {exc}")
 
     steps = 0
     turns = 0
@@ -481,22 +597,11 @@ def main() -> None:
                         previous_pos[uid] = None
             if not controlled_units:
                 if owned_cities:
-                    # No active units, but we need to advance production/research.
+                    # No active units; just end turn and let existing research/production progress.
                     client.end_turn()
                     turns += 1
                     steps += 1
-                    # Refresh city/production status and check if research finished.
                     owned_cities = discover_player_cities(client, player_id)
-                    if not research_confirmed_complete:
-                        research_confirmed_complete = is_target_researched(client, player_id)
-                    if research_confirmed_complete:
-                        for cid, _cx, _cy in owned_cities:
-                            if cid in queued_city_production:
-                                continue
-                            queued = queue_city_production(client, cid)
-                            print(f"[turn {turns}] queued {PRODUCTION_UNIT_NAME} in city {cid} success={queued}")
-                            if queued:
-                                queued_city_production.add(cid)
                     time.sleep(args.sleep)
                     continue
                 break
@@ -507,7 +612,6 @@ def main() -> None:
             unit_desc = format_unit_label(unit_id, unit_type_labels)
             label_lower = unit_type_labels.get(unit_id, "").lower()
             is_settler = "settler" in label_lower
-            is_thanos = "thanos" in label_lower
             try:
                 snapshot, player_id = gather_snapshot(
                     client=client,
@@ -519,6 +623,8 @@ def main() -> None:
                     known_enemy=known_enemy,
                     visited_tiles=visited_tiles,
                 )
+                last_research_flags = snapshot.research_flags
+                print(f"[research-status] current={snapshot.research_name} flags={snapshot.research_flags}")
             except RuntimeError as exc:
                 print(f"[step {steps}] unit={unit_desc} unavailable: {exc}")
                 controlled_units.remove(unit_id)
@@ -544,21 +650,16 @@ def main() -> None:
                     acted_this_turn = True
                     continue
             else:
-                # Ensure research is set and detect completion.
-                if not snapshot.research_done:
-                    success = set_research_to_target(client, player_id)
-                    print(f"[step {steps}] unit={unit_desc} set research success={success}")
-                    research_confirmed_complete = is_target_researched(client, player_id)
-                else:
-                    research_confirmed_complete = True
+                # Research completion status based on snapshot flags only.
+                research_confirmed_complete = bool(snapshot.research_done)
 
-                # Queue Thanos once research is done.
+                # Queue unit once research is done.
                 if research_confirmed_complete:
                     for cid, _cx, _cy in owned_cities:
                         if cid in queued_city_production:
                             continue
-                        queued = queue_city_production(client, cid)
-                        print(f"[step {steps}] queued {PRODUCTION_UNIT_NAME} in city {cid} success={queued}")
+                        queued = queue_city_production(client, cid, snapshot.research_flags, unit_values)
+                        print(f"[step {steps}] queued production in city {cid} success={queued}")
                         if queued:
                             queued_city_production.add(cid)
 
@@ -571,21 +672,9 @@ def main() -> None:
                 status = snapshot.status_lookup.get((nx, ny))
                 if not status:
                     continue
-                _au_char, _enemy_flag, enemy_units, friendly_units = status
+                _au_char, _enemy_flag, enemy_units, friendly_units, *_rest = status
                 if enemy_units and not friendly_units:
                     enemy_targets.append((idx, nx, ny))
-
-            if enemy_targets and is_thanos:
-                idx, nx, ny = enemy_targets[0]
-                success = client.attack_target(unit_id, nx, ny)
-                print(
-                    f"[step {steps}] unit={unit_desc} attack target=({nx},{ny}) dir_idx={idx} success={success}"
-                )
-                previous_pos[unit_id] = snapshot.player_pos
-                time.sleep(args.sleep)
-                steps += 1
-                acted_this_turn = True
-                continue
 
             board_state = build_state(map_cfg, snapshot)
             canonical = CanonicalBoard(board_state, 1)
@@ -631,14 +720,8 @@ def main() -> None:
                 print(f"[step {steps}] unit={unit_desc} {action_desc} success={built}")
                 if built:
                     owned_cities = discover_player_cities(client, player_id)
-                    # Immediately set research to the target tech after founding.
-                    success = set_research_to_target(client, player_id)
-                    research_confirmed_complete = is_target_researched(client, player_id)
-                    print(f"[step {steps}] set research post-found success={success} researched={research_confirmed_complete}")
                     controlled_units.remove(unit_id)
                     previous_pos.pop(unit_id, None)
-                    # after founding, ensure research starts next loop
-                    research_confirmed_complete = False
             elif action == board_state.BUILD_CITY_ACTION and not is_settler:
                 # Treat bad build choice as a move attempt to avoid idling.
                 fallback_dir = fallback_move_direction(
@@ -659,19 +742,6 @@ def main() -> None:
                 else:
                     print(f"[step {steps}] unit={unit_desc} skip build (not a settler)")
                     previous_pos[unit_id] = None
-            elif action == board_state.PRODUCE_THANOS_ACTION:
-                if owned_cities:
-                    target_city = owned_cities[0][0]
-                    queued = queue_city_production(client, target_city)
-                    print(
-                        f"[step {steps}] unit={unit_desc} set production city={target_city} "
-                        f"success={queued}"
-                    )
-                    if queued:
-                        queued_city_production.add(target_city)
-                else:
-                    print(f"[step {steps}] unit={unit_desc} requested production but no city available")
-                previous_pos[unit_id] = None
             elif board_state.RESEARCH_ACTION_BASE <= action < board_state.RESEARCH_ACTION_BASE + board_state.RESEARCH_ACTION_COUNT:
                 tech_idx = action - board_state.RESEARCH_ACTION_BASE
                 tech_name = board_state.RESEARCH_TECHS[tech_idx]
@@ -681,7 +751,7 @@ def main() -> None:
                     )
                     success = False
                 else:
-                    success = set_research_to_target(client, player_id, tech_name=tech_name)
+                    success = set_research_to_target(client, player_id, research_flags=snapshot.research_flags, tech_name=tech_name)
                     print(
                         f"[step {steps}] unit={unit_desc} set research tech={tech_name} success={success}"
                     )
@@ -720,8 +790,8 @@ def main() -> None:
             for cid, _cx, _cy in owned_cities:
                 if cid in queued_city_production:
                     continue
-                queued = queue_city_production(client, cid)
-                print(f"[turn {turns}] queued {PRODUCTION_UNIT_NAME} in city {cid} success={queued}")
+                queued = queue_city_production(client, cid, research_flags=last_research_flags, unit_values=unit_values)
+                print(f"[turn {turns}] queued production in city {cid} success={queued}")
                 if queued:
                     queued_city_production.add(cid)
 

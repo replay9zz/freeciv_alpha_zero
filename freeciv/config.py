@@ -19,13 +19,10 @@ class MapConfig:
     elimination_bonus: float = 1.5
     draw_value: float = 1e-4
     build_city_reward: float = 0.15
-    thanos_completion_reward: float = 0.35
-    thanos_build_time: int = 3
     research_reward: float = 0.02
     # Optional per-tech rewards; falls back to research_reward when missing.
     research_reward_map: Dict[str, float] = field(default_factory=dict)
     move_reward: float = 0.02
-    thanos_move_reward: float = 0.05
 
 
 @dataclass

@@ -30,22 +30,16 @@ class FreecivBoardState:
     scores: Dict[Player, float] = field(default_factory=lambda: {1: 0.0, -1: 0.0})
     prev_positions: Dict[Player, Optional[Coord]] = field(default_factory=lambda: {1: None, -1: None})
     cities: Dict[Player, Optional[Coord]] = field(default_factory=lambda: {1: None, -1: None})
-    production_remaining: Dict[Player, int] = field(default_factory=lambda: {1: -1, -1: -1})
-    thanos_units: Dict[Player, Optional[Coord]] = field(default_factory=lambda: {1: None, -1: None})
-    thanos_prev_positions: Dict[Player, Optional[Coord]] = field(default_factory=lambda: {1: None, -1: None})
     research_complete: Dict[Player, bool] = field(default_factory=lambda: {1: False, -1: False})
     research_done: Dict[Player, Dict[str, bool]] = field(default_factory=lambda: {1: {}, -1: {}})
 
     SETTLER_MOVE_COUNT = 6
     BUILD_CITY_ACTION = SETTLER_MOVE_COUNT
-    PRODUCE_THANOS_ACTION = BUILD_CITY_ACTION + 1
     TARGET_TECH_NAME = TARGET_TECH_NAME
     RESEARCH_TECHS: Tuple[str, ...] = RESEARCH_TECHS
-    RESEARCH_ACTION_BASE = PRODUCE_THANOS_ACTION + 1
+    RESEARCH_ACTION_BASE = BUILD_CITY_ACTION + 1
     RESEARCH_ACTION_COUNT = len(RESEARCH_TECHS)
-    THANOS_MOVE_BASE = RESEARCH_ACTION_BASE + RESEARCH_ACTION_COUNT
-    THANOS_MOVE_COUNT = 6
-    ACTION_SIZE = THANOS_MOVE_BASE + THANOS_MOVE_COUNT
+    ACTION_SIZE = RESEARCH_ACTION_BASE + RESEARCH_ACTION_COUNT
     PASS_ACTION = ACTION_SIZE
 
     def __post_init__(self) -> None:
@@ -66,9 +60,6 @@ class FreecivBoardState:
         self.scores = {1: 0.0, -1: 0.0}
         self.prev_positions = {1: None, -1: None}
         self.cities = {1: None, -1: None}
-        self.production_remaining = {1: -1, -1: -1}
-        self.thanos_units = {1: None, -1: None}
-        self.thanos_prev_positions = {1: None, -1: None}
         self.research_complete = {1: False, -1: False}
         self.research_done = self._init_research_status()
 
@@ -154,10 +145,6 @@ class FreecivBoardState:
         new.prev_positions = {p: pos for p, pos in self.prev_positions.items()}
         new.cities = {p: (coord if coord is None else (coord[0], coord[1]))
                       for p, coord in self.cities.items()}
-        new.production_remaining = {p: remaining for p, remaining in self.production_remaining.items()}
-        new.thanos_units = {p: (coord if coord is None else (coord[0], coord[1]))
-                            for p, coord in self.thanos_units.items()}
-        new.thanos_prev_positions = {p: pos for p, pos in self.thanos_prev_positions.items()}
         new.research_complete = {p: flag for p, flag in self.research_complete.items()}
         new.research_done = {p: {tech: status for tech, status in self.research_done.get(p, {}).items()}
                              for p in self.research_done}
@@ -184,15 +171,6 @@ class FreecivBoardState:
         if self.cities[player] is None:
             moves[self.BUILD_CITY_ACTION] = 1
 
-        # Special production can start if a city exists and none is being built/active
-        if (
-            has_city
-            and self.thanos_units[player] is None
-            and self.production_remaining[player] < 0
-            and self.research_complete[player]
-        ):
-            moves[self.PRODUCE_THANOS_ACTION] = 1
-
         # Research action (one-time per tech) gated on having a city
         if has_city:
             for idx, tech in enumerate(self.RESEARCH_TECHS):
@@ -200,24 +178,10 @@ class FreecivBoardState:
                     continue
                 moves[self.RESEARCH_ACTION_BASE + idx] = 1
 
-        # Special movement once produced
-        thanos_pos = self.thanos_units.get(player)
-        if thanos_pos is not None:
-            neighbors = self.movement.get_native_neighbors(*thanos_pos)
-            for idx, (nx, ny) in enumerate(neighbors):
-                if nx is None:
-                    continue
-                if self.gt.au_map[ny, nx] == 'A':
-                    moves[self.THANOS_MOVE_BASE + idx] = 1
-
         moves[-1] = 1  # allow pass
         return moves
 
     def step(self, player: Player, action: int) -> None:
-        if self.winner is not None:
-            return
-        # Advance any ongoing production before the player acts.
-        self._advance_city_production(player)
         if self.winner is not None:
             return
 
@@ -242,16 +206,13 @@ class FreecivBoardState:
         acted = False
         if 0 <= action < self.SETTLER_MOVE_COUNT:
             acted = True
-            if not self._move_actor(player, action, is_thanos=False):
+            if not self._move_actor(player, action):
                 return
         elif action == self.BUILD_CITY_ACTION:
             acted = True
             self._handle_build_city(player)
             if self.winner is not None:
                 return
-        elif action == self.PRODUCE_THANOS_ACTION:
-            acted = True
-            self._start_thanos_production(player)
         elif self.RESEARCH_ACTION_BASE <= action < self.RESEARCH_ACTION_BASE + self.RESEARCH_ACTION_COUNT:
             acted = True
             tech_idx = action - self.RESEARCH_ACTION_BASE
@@ -262,11 +223,6 @@ class FreecivBoardState:
                     self.research_complete[player] = True
                 reward = self.cfg.research_reward_map.get(tech_name, self.cfg.research_reward)
                 self.scores[player] += reward
-        elif self.THANOS_MOVE_BASE <= action < self.THANOS_MOVE_BASE + self.THANOS_MOVE_COUNT:
-            acted = True
-            dir_idx = action - self.THANOS_MOVE_BASE
-            if not self._move_actor(player, dir_idx, is_thanos=True):
-                return
 
         if not acted:
             # treat as pass if somehow no branch matched, though valid() should prevent this
@@ -276,11 +232,11 @@ class FreecivBoardState:
         if self.turn >= self.cfg.max_turns:
             self._resolve_terminal(reason="max_turns")
 
-    def _move_actor(self, player: Player, dir_idx: int, is_thanos: bool) -> bool:
+    def _move_actor(self, player: Player, dir_idx: int) -> bool:
         if self.winner is not None:
             return False
 
-        position = self.thanos_units[player] if is_thanos else self.units[player]
+        position = self.units[player]
         if position is None:
             self.scores[player] += self.cfg.wall_penalty
             return False
@@ -296,14 +252,11 @@ class FreecivBoardState:
 
         was_visited = bool(self.visited[player][ny, nx])
         prev_reveal = self.revealed[player].sum()
-        if is_thanos:
-            self.thanos_units[player] = (nx, ny)
-        else:
-            self.units[player] = (nx, ny)
+        self.units[player] = (nx, ny)
         self.visited[player][ny, nx] = True
         self._reveal(player, origin=(nx, ny))
         newly_revealed = self.revealed[player].sum() - prev_reveal
-        self._apply_move_rewards(player, was_visited, newly_revealed, position, (nx, ny), is_thanos)
+        self._apply_move_rewards(player, was_visited, newly_revealed, position, (nx, ny))
 
         if self.winner is not None:
             return False
@@ -325,7 +278,6 @@ class FreecivBoardState:
         newly_revealed: float,
         prev_pos: Coord,
         new_pos: Coord,
-        is_thanos: bool,
     ) -> None:
         # Small reward just for making a move to discourage idling.
         self.scores[player] += getattr(self.cfg, "move_reward", 0.0)
@@ -338,14 +290,10 @@ class FreecivBoardState:
         else:
             self.scores[player] += self.cfg.backtrack_penalty
 
-        tracker = self.thanos_prev_positions if is_thanos else self.prev_positions
+        tracker = self.prev_positions
         if tracker[player] is not None and new_pos == tracker[player]:
             self.scores[player] += self.cfg.backtrack_penalty
         tracker[player] = prev_pos
-
-        # Extra incentive for Thanos to move/attack.
-        if is_thanos:
-            self.scores[player] += getattr(self.cfg, "thanos_move_reward", 0.0)
 
     def _handle_build_city(self, player: Player) -> None:
         if self.cities[player] is not None:
@@ -357,38 +305,6 @@ class FreecivBoardState:
         self.scores[player] += self.cfg.build_city_reward
         self._check_collisions(player)
 
-    def _start_thanos_production(self, player: Player) -> None:
-        if self.cities[player] is None:
-            return
-        if self.thanos_units[player] is not None:
-            return
-        if self.production_remaining[player] >= 0:
-            return
-        build_time = max(1, int(self.cfg.thanos_build_time))
-        self.production_remaining[player] = build_time
-
-    def _advance_city_production(self, player: Player) -> None:
-        remaining = self.production_remaining[player]
-        if remaining < 0:
-            return
-        remaining -= 1
-        if remaining > 0:
-            self.production_remaining[player] = remaining
-            return
-
-        self.production_remaining[player] = -1
-        city_tile = self.cities[player]
-        if city_tile is None:
-            return
-
-        self.thanos_units[player] = city_tile
-        self.thanos_prev_positions[player] = None
-        cx, cy = city_tile
-        self.visited[player][cy, cx] = True
-        self._reveal(player, origin=city_tile)
-        self.scores[player] += self.cfg.thanos_completion_reward
-        self._check_collisions(player)
-
     def _check_collisions(self, player: Player) -> None:
         if self.winner is not None:
             return
@@ -398,24 +314,16 @@ class FreecivBoardState:
 
         if self.units.get(player) is not None:
             player_positions.append(("settler", self.units[player]))
-        if self.thanos_units.get(player) is not None:
-            player_positions.append(("thanos", self.thanos_units[player]))
 
         if self.units.get(opponent) is not None:
             opponent_positions.append(("settler", self.units[opponent]))
-        if self.thanos_units.get(opponent) is not None:
-            opponent_positions.append(("thanos", self.thanos_units[opponent]))
 
         for pkind, pcoord in player_positions:
             for okind, ocoord in opponent_positions:
                 if pcoord == ocoord:
                     self.scores[player] += self.cfg.elimination_bonus
                     self.scores[opponent] -= self.cfg.elimination_bonus
-                    if okind == "thanos":
-                        self.thanos_units[opponent] = None
-                        self.thanos_prev_positions[opponent] = None
-                    else:
-                        self.units[opponent] = ocoord
+                    self.units[opponent] = ocoord
                     self._resolve_terminal(winner=player, reason=f"{pkind}_capture")
                     return
 
@@ -471,24 +379,9 @@ class FreecivBoardState:
             city_opp[cy, cx] = 1.0
         channels.append(city_me)
         channels.append(city_opp)
-        thanos_me = np.zeros_like(unit_me)
-        thanos_opp = np.zeros_like(unit_me)
-        if self.thanos_units[me] is not None:
-            sx, sy = self.thanos_units[me]
-            thanos_me[sy, sx] = 1.0
-        if self.thanos_units[opp] is not None:
-            sx, sy = self.thanos_units[opp]
-            thanos_opp[sy, sx] = 1.0
-        channels.append(thanos_me)
-        channels.append(thanos_opp)
         channels.append(self.visited[me].astype(np.float32))
         channels.append(self.visited[opp].astype(np.float32))
         channels.append(self.gt.enemy_map.astype(np.float32))
-        build_time = max(1, float(self.cfg.thanos_build_time))
-        prod_me = np.full_like(unit_me, max(0.0, float(self.production_remaining[me])) / build_time)
-        prod_opp = np.full_like(unit_me, max(0.0, float(self.production_remaining[opp])) / build_time)
-        channels.append(prod_me)
-        channels.append(prod_opp)
         research_me = np.full_like(unit_me, 1.0 if self.research_complete.get(me, False) else 0.0)
         research_opp = np.full_like(unit_me, 1.0 if self.research_complete.get(opp, False) else 0.0)
         channels.append(research_me)
@@ -508,10 +401,7 @@ class FreecivBoardState:
             parts.append(f"p{p}:{x},{y}")
             if self.cities[p] is not None:
                 cx, cy = self.cities[p]
-                parts.append(f"city{p}:{cx},{cy}({self.production_remaining[p]})")
-            if self.thanos_units[p] is not None:
-                sx, sy = self.thanos_units[p]
-                parts.append(f"spec{p}:{sx},{sy}")
+                parts.append(f"city{p}:{cx},{cy}")
             parts.append(f"research{p}:{self.research_complete[p]}")
             done_labels = ",".join(
                 tech for tech, done in self.research_done.get(p, {}).items() if done
