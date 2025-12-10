@@ -1,0 +1,159 @@
+# Tier 0
+- tech: None
+  unlocks:
+    - kind: unit
+      name: Settlers
+      attack: 0
+      defense: 1
+      hp: 20
+      firepower: 1
+      moves: 1
+      cost: 30
+      upkeep:
+        food: 1
+      pop_cost: 2
+    - kind: unit
+      name: Workers
+      attack: 0
+      defense: 1
+      hp: 10
+      firepower: 1
+      moves: 1
+      cost: 20
+      upkeep:
+        shields: 1
+        gold: 1
+    - kind: unit
+      name: Warriors
+      attack: 1
+      defense: 1
+      hp: 10
+      firepower: 1
+      moves: 1
+      cost: 10
+    - kind: unit
+      name: Explorer
+      attack: 0
+      defense: 1
+      hp: 10
+      firepower: 1
+      moves: 1
+      vision_radius_sq: 6
+      cost: 30
+    - kind: building
+      name: Barracks
+      cost: 30
+      upkeep: 1
+    - kind: building
+      name: Palace
+      cost: 70
+      upkeep: 0
+
+# Tier 1
+- tech: Alphabet
+  unlocks:
+    - kind: unit
+      name: Diplomat
+      attack: 0
+      defense: 0
+      hp: 10
+      firepower: 1
+      moves: 2
+      cost: 30
+
+- tech: Pottery
+  unlocks:
+    - kind: unit
+      name: Migrants
+      attack: 0
+      defense: 1
+      hp: 20
+      firepower: 1
+      moves: 1
+      cost: 10
+      upkeep:
+        food: 1
+      pop_cost: 1
+    - kind: building
+      name: Granary
+      cost: 40
+      upkeep: 1
+
+- tech: Bronze Working
+  unlocks:
+    - kind: unit
+      name: Phalanx
+      attack: 1
+      defense: 2
+      hp: 10
+      firepower: 1
+      moves: 1
+      cost: 20
+
+- tech: Warrior Code
+  unlocks:
+    - kind: unit
+      name: Archers
+      attack: 3
+      defense: 1
+      hp: 10
+      firepower: 1
+      moves: 1
+      cost: 20
+
+- tech: Horseback Riding
+  unlocks:
+    - kind: unit
+      name: Horsemen
+      attack: 2
+      defense: 1
+      hp: 10
+      firepower: 1
+      moves: 2
+      cost: 20
+
+- tech: Masonry
+  unlocks:
+    - kind: building
+      name: City Walls
+      cost: 30
+      upkeep: 0
+
+
+- tech: Ceremonial Burial
+  unlocks:
+    - kind: building
+      name: Temple
+      cost: 30
+      upkeep: 1
+
+# Tier 2
+- tech: Map Making
+  unlocks:
+    - kind: unit
+      name: Trireme
+      attack: 0
+      defense: 1
+      hp: 10
+      firepower: 1
+      moves: 3
+      cost: 20
+      transport_cap: 2
+
+- tech: Writing
+  unlocks:
+    - kind: building
+      name: Library
+      cost: 60
+      upkeep: 1
+
+- tech: Iron Working
+  unlocks:
+    - kind: unit
+      name: Legion
+      attack: 4
+      defense: 2
+      hp: 10
+      firepower: 1
+      moves: 1
+      cost: 30
