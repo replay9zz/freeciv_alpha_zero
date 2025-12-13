@@ -1,0 +1,5 @@
+# Optional per-building multipliers for unlock-derived research rewards.
+# Name must match the "name" field in tech_unlocks.yaml entries.
+# Add entries like:
+Granary: 0.5
+City Walls: 1.2

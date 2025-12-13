@@ -3,6 +3,7 @@ from __future__ import annotations
 import argparse
 import time
 import logging
+from pathlib import Path
 
 try:
     from freeciv_alpha_zero.Coach import Coach  # type: ignore
@@ -21,6 +22,90 @@ from .research_policy import (
     TECH_PREREQS,
     reward_map_from_goals,
 )
+from .combat_game import CombatGame
+
+log = logging.getLogger(__name__)
+
+# Optional per-unit multipliers to adjust unlock-derived values.
+DEFAULT_UNIT_VALUE_MULTIPLIERS: dict[str, float] = {
+    # Situational units: down-weight to avoid overvaluing rare production.
+    "Migrants": 0.5,
+    "Diplomat": 0.5,
+}
+# Optional per-building multipliers to adjust unlock-derived values.
+DEFAULT_BUILDING_VALUE_MULTIPLIERS: dict[str, float] = {}
+
+
+def load_unit_value_multipliers(path: Path) -> dict[str, float]:
+    """
+    Load per-unit multipliers from YAML (name -> multiplier). Missing/invalid
+    files are ignored so that defaults still apply.
+    """
+    if not path.exists():
+        return {}
+    try:
+        import yaml  # type: ignore
+    except Exception as exc:  # pragma: no cover - optional dep
+        log.warning("PyYAML missing; skipping unit multipliers: %s", exc)
+        return {}
+
+    with path.open("r", encoding="utf-8") as f:
+        data = yaml.safe_load(f)
+    if data is None:
+        return {}
+    if not isinstance(data, dict):
+        log.warning("Unit multiplier file must be a mapping; got %r", type(data))
+        return {}
+
+    multipliers: dict[str, float] = {}
+    for name, val in data.items():
+        try:
+            multipliers[str(name)] = float(val)
+        except Exception:
+            log.warning("Skipping invalid multiplier for %s: %r", name, val)
+    return multipliers
+
+
+# Merge defaults with file-based overrides (if present).
+UNIT_VALUE_MULTIPLIERS = dict(DEFAULT_UNIT_VALUE_MULTIPLIERS)
+_mult_path = Path(__file__).resolve().parent / "data" / "unit_value_multipliers.yaml"
+UNIT_VALUE_MULTIPLIERS.update(load_unit_value_multipliers(_mult_path))
+
+
+def load_building_value_multipliers(path: Path) -> dict[str, float]:
+    """
+    Load per-building multipliers from YAML (name -> multiplier). Missing/invalid
+    files are ignored so that defaults still apply.
+    """
+    if not path.exists():
+        return {}
+    try:
+        import yaml  # type: ignore
+    except Exception as exc:  # pragma: no cover - optional dep
+        log.warning("PyYAML missing; skipping building multipliers: %s", exc)
+        return {}
+
+    with path.open("r", encoding="utf-8") as f:
+        data = yaml.safe_load(f)
+    if data is None:
+        return {}
+    if not isinstance(data, dict):
+        log.warning("Building multiplier file must be a mapping; got %r", type(data))
+        return {}
+
+    multipliers: dict[str, float] = {}
+    for name, val in data.items():
+        try:
+            multipliers[str(name)] = float(val)
+        except Exception:
+            log.warning("Skipping invalid multiplier for %s: %r", name, val)
+    return multipliers
+
+
+# Merge defaults with file-based overrides (if present).
+BUILDING_VALUE_MULTIPLIERS = dict(DEFAULT_BUILDING_VALUE_MULTIPLIERS)
+_bmult_path = Path(__file__).resolve().parent / "data" / "building_value_multipliers.yaml"
+BUILDING_VALUE_MULTIPLIERS.update(load_building_value_multipliers(_bmult_path))
 
 # ----------------------------------------------------------------------
 # Tech unlock loading
@@ -44,19 +129,21 @@ def load_tech_unlocks(path: str) -> list[dict]:
 
 
 def unit_value(entry: dict) -> float:
-    """Rough value score for a unit."""
+    """Rough value score for a unit, with optional per-unit multipliers."""
     atk = float(entry.get("attack", 0))
     df = float(entry.get("defense", 0))
     hp = float(entry.get("hp", 1))
     cost = max(float(entry.get("cost", 1)), 1.0)
-    return (atk + df) * hp / cost
+    mult = UNIT_VALUE_MULTIPLIERS.get(str(entry.get("name", "")), 1.0)
+    return mult * (atk + df) * hp / cost
 
 
 def building_value(entry: dict) -> float:
-    """Flat value for a building; cheap heuristic."""
+    """Flat value for a building; cheap heuristic with per-building multipliers."""
     base = 0.5
     cost = max(float(entry.get("cost", 1)), 1.0)
-    return base * (cost / 30.0)
+    mult = BUILDING_VALUE_MULTIPLIERS.get(str(entry.get("name", "")), 1.0)
+    return mult * base * (cost / 30.0)
 
 
 def reward_map_from_unlocks(unlocks: list[dict], base_reward: float) -> dict[str, float]:
@@ -93,6 +180,8 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument('--load-folder', default=None)
     parser.add_argument('--load-file', default=None)
     parser.add_argument('--stats-path', default=None)
+    parser.add_argument('--mode', choices=['default', 'combat', 'multihead'], default='default', help='Training environment')
+    parser.add_argument('--max-units', type=int, default=4, help='Max units per side for multihead mode')
     return parser.parse_args()
 
 def format_duration(seconds: float) -> str:
@@ -126,7 +215,16 @@ def main():
         )
         logging.info("Research reward map built: %s", map_cfg.research_reward_map)
     provider = RandomMapProvider(map_cfg.map_w, map_cfg.map_h)
-    game = FreecivGame(map_cfg, provider)
+    if args.mode == 'combat':
+        game = CombatGame(map_cfg, provider)
+        logging.info("Using combat training mode (multi-unit attack-focused).")
+    elif args.mode == 'multihead':
+        from .multihead_game import MultiheadGame  # local import to avoid circulars when unused
+        game = MultiheadGame(map_cfg, provider, max_units=args.max_units)
+        logging.info("Using multihead training mode (move/attack + research, multiple units).")
+    else:
+        game = FreecivGame(map_cfg, provider)
+        logging.info("Using default training mode.")
     nnet = NNetWrapper(game)
 
     train_cfg = TrainingConfig()

@@ -52,13 +52,15 @@ class Arena():
                 assert self.display
                 print("Turn ", str(it), "Player ", str(curPlayer))
                 self.display(board)
-            action = players[curPlayer + 1](self.game.getCanonicalForm(board, curPlayer))
+            canonical = self.game.getCanonicalForm(board, curPlayer)
+            action = players[curPlayer + 1](canonical)
 
-            valids = self.game.getValidMoves(self.game.getCanonicalForm(board, curPlayer), 1)
-
+            # Recompute valids on the current board to avoid stale masks.
+            valids = self.game.getValidMoves(canonical, 1)
             if valids[action] == 0:
                 log.error(f'Action {action} is not valid!')
                 log.debug(f'valids = {valids}')
+                log.debug(f'state = {self.game.stringRepresentation(canonical)}')
                 valid_indices = [idx for idx, flag in enumerate(valids) if flag]
                 if not valid_indices:
                     raise RuntimeError("No valid moves available for Arena player")

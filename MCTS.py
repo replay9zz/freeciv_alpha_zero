@@ -49,10 +49,19 @@ class MCTS():
 
         counts = [x ** (1. / temp) for x in counts]
         counts_sum = float(sum(counts))
+        if counts_sum == 0:
+            # Degenerate case: nothing was visited; fall back to valid moves.
+            valids = self.game.getValidMoves(canonicalBoard, 1)
+            counts = list(valids)
+            counts_sum = float(np.sum(counts))
+            if counts_sum == 0:
+                # No valid moves either; return uniform to avoid crashing.
+                counts = [1.0] * len(counts)
+                counts_sum = float(len(counts))
         probs = [x / counts_sum for x in counts]
         return probs
 
-    def search(self, canonicalBoard):
+    def search(self, canonicalBoard, path=None):
         """
         This function performs one iteration of MCTS. It is recursively called
         till a leaf node is found. The action chosen at each node is one that
@@ -72,12 +81,21 @@ class MCTS():
             v: the negative of the value of the current canonicalBoard
         """
 
+        if path is None:
+            path = set()
+
         s = self.game.stringRepresentation(canonicalBoard)
+
+        # Break out of potential cycles (state repeats along the current path).
+        if s in path:
+            return 0
+        path.add(s)
 
         if s not in self.Es:
             self.Es[s] = self.game.getGameEnded(canonicalBoard, 1)
         if self.Es[s] != 0:
             # terminal node
+            path.discard(s)
             return -self.Es[s]
 
         if s not in self.Ps:
@@ -99,6 +117,7 @@ class MCTS():
 
             self.Vs[s] = valids
             self.Ns[s] = 0
+            path.discard(s)
             return -v
 
         valids = self.Vs[s]
@@ -121,8 +140,12 @@ class MCTS():
         a = best_act
         next_s, next_player = self.game.getNextState(canonicalBoard, 1, a)
         next_s = self.game.getCanonicalForm(next_s, next_player)
+        # Guard against self-loops causing infinite recursion.
+        if self.game.stringRepresentation(next_s) == s:
+            path.discard(s)
+            return 0
 
-        v = self.search(next_s)
+        v = self.search(next_s, path)
 
         if (s, a) in self.Qsa:
             self.Qsa[(s, a)] = (self.Nsa[(s, a)] * self.Qsa[(s, a)] + v) / (self.Nsa[(s, a)] + 1)
@@ -133,4 +156,5 @@ class MCTS():
             self.Nsa[(s, a)] = 1
 
         self.Ns[s] += 1
+        path.discard(s)
         return -v

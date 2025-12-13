@@ -63,6 +63,58 @@ from freeciv_alpha_zero.freeciv.explore_policy import (
     fallback_move_direction,
 )
 
+# Units we want to avoid auto-producing even if unlocked (tempo killers).
+EXCLUDED_PRODUCTION_UNITS = {"Migrants"}
+
+def get_unit_rule_name(client: LuaRemoteClient, unit_id: int) -> Optional[str]:
+    """
+    Ask Lua for the rule_name of a unit by id.
+    """
+    lua = (
+        "return (function() "
+        f"local u = find.unit and find.unit({unit_id}); "
+        "if not u or not u.utype then return '__NONE__' end; "
+        "local ok, ut = pcall(function() return u:utype() end); "
+        "if not ok or not ut or not ut.rule_name then return '__NONE__' end; "
+        "local ok2, nm = pcall(function() return ut:rule_name() end); "
+        "if ok2 and nm then return nm end; "
+        "return '__NONE__' "
+        "end)()"
+    )
+    try:
+        res = client.eval(lua)
+        val = res.last_return() if res else None
+        if isinstance(val, str) and val != "__NONE__":
+            return val
+    except Exception:
+        return None
+    return None
+
+
+def enemy_strength_map(
+    client: LuaRemoteClient,
+    player_id: Optional[int],
+    unit_values: Dict[str, Tuple[str, float]],
+) -> Dict[Tuple[int, int], float]:
+    """
+    Build a map of enemy unit strengths keyed by tile coordinates.
+    """
+    strengths: Dict[Tuple[int, int], float] = {}
+    if player_id is None:
+        return strengths
+    try:
+        units = list_all_units(client)
+    except Exception:
+        return strengths
+    value_lookup = {name: val for name, (_tech, val) in unit_values.items()}
+    for uid, ux, uy, owner in units:
+        if owner == player_id:
+            continue
+        name = get_unit_rule_name(client, uid)
+        val = value_lookup.get(name or "", 0.0)
+        strengths[(ux, uy)] = val
+    return strengths
+
 
 def format_unit_label(unit_id: int, unit_types: Dict[int, str]) -> str:
     label = unit_types.get(unit_id)
@@ -187,6 +239,8 @@ def pick_production_target(research_flags: Dict[str, bool], unit_values: Dict[st
     best_name = "Warriors"
     best_val = -1.0
     for name, (req_tech, val) in unit_values.items():
+        if name in EXCLUDED_PRODUCTION_UNITS:
+            continue
         if req_tech and not research_flags.get(req_tech, False):
             continue
         if val > best_val:
@@ -569,8 +623,8 @@ def main() -> None:
     previous_pos: Dict[int, Optional[Tuple[int, int]]] = {uid: None for uid in controlled_units}
     owned_cities = discover_player_cities(client, player_id)
     queued_city_production: Set[int] = set()
-    research_confirmed_complete = False
     last_research_flags: Dict[str, bool] = {}
+    known_enemy_target: Optional[Tuple[int, int]] = None
 
     # Preload unlock values for production selection
     unlock_path = Path(__file__).resolve().parent / "data" / "tech_unlocks.yaml"
@@ -580,6 +634,7 @@ def main() -> None:
     except Exception as exc:
         unit_values = {}
         print(f"[config] failed to load unit values from {unlock_path}: {exc}")
+    unit_strengths = {name: val for name, (_tech, val) in unit_values.items()}
 
     steps = 0
     turns = 0
@@ -595,8 +650,13 @@ def main() -> None:
                     controlled_units.extend(refreshed_units)
                     for uid in refreshed_units:
                         previous_pos[uid] = None
+                    print(f"[units] refreshed and found {len(refreshed_units)} unit(s)")
+            # Refresh city info before deciding to exit.
+            owned_cities = discover_player_cities(client, player_id)
             if not controlled_units:
                 if owned_cities:
+                    # Ensure research is explicitly set even when no units are active.
+                    set_research_to_target(client, player_id, research_flags=last_research_flags or {})
                     # No active units; just end turn and let existing research/production progress.
                     client.end_turn()
                     turns += 1
@@ -612,6 +672,8 @@ def main() -> None:
             unit_desc = format_unit_label(unit_id, unit_type_labels)
             label_lower = unit_type_labels.get(unit_id, "").lower()
             is_settler = "settler" in label_lower
+            # Precompute enemy strengths for this turn to guide attack decisions.
+            enemy_strengths = enemy_strength_map(client, player_id, unit_values)
             try:
                 snapshot, player_id = gather_snapshot(
                     client=client,
@@ -623,6 +685,9 @@ def main() -> None:
                     known_enemy=known_enemy,
                     visited_tiles=visited_tiles,
                 )
+                if last_research_flags and snapshot.research_flags != last_research_flags:
+                    queued_city_production.clear()
+                    print(f"[research-status] flags changed; will requeue production for all cities")
                 last_research_flags = snapshot.research_flags
                 print(f"[research-status] current={snapshot.research_name} flags={snapshot.research_flags}")
             except RuntimeError as exc:
@@ -631,8 +696,18 @@ def main() -> None:
                 previous_pos.pop(unit_id, None)
                 continue
             visited_tiles.add(snapshot.player_pos)
+            # Track first seen enemy location (city or unit); cities do not move.
+            if known_enemy_target is None:
+                for (nx, ny), status in snapshot.status_lookup.items():
+                    if not status:
+                        continue
+                    _au_char, enemy_flag, enemy_units, _friendly_units, *_rest = status
+                    if enemy_flag or enemy_units or snapshot.enemy_map[ny, nx]:
+                        known_enemy_target = (nx, ny)
+                        print(f"[target] locked enemy location at ({nx},{ny})")
+                        break
 
-            # Found a city immediately if none exists.
+        # Found a city immediately if none exists.
             if not owned_cities and is_settler:
                 city_name = f"AutoCity{len(owned_cities) + 1}"
                 built = client.found_city(unit_id, city_name)
@@ -650,18 +725,17 @@ def main() -> None:
                     acted_this_turn = True
                     continue
             else:
-                # Research completion status based on snapshot flags only.
-                research_confirmed_complete = bool(snapshot.research_done)
-
-                # Queue unit once research is done.
-                if research_confirmed_complete:
-                    for cid, _cx, _cy in owned_cities:
-                        if cid in queued_city_production:
-                            continue
-                        queued = queue_city_production(client, cid, snapshot.research_flags, unit_values)
-                        print(f"[step {steps}] queued production in city {cid} success={queued}")
-                        if queued:
-                            queued_city_production.add(cid)
+                # Ensure research is explicitly set (override client auto if needed).
+                if owned_cities:
+                    set_research_to_target(client, player_id, research_flags=snapshot.research_flags)
+                # Queue production whenever needed (initially or after tech changes).
+                for cid, _cx, _cy in owned_cities:
+                    if cid in queued_city_production:
+                        continue
+                    queued = queue_city_production(client, cid, snapshot.research_flags, unit_values)
+                    print(f"[step {steps}] queued production in city {cid} success={queued}")
+                    if queued:
+                        queued_city_production.add(cid)
 
             # Attempt to attack immediately if an enemy unit is adjacent.
             px, py = snapshot.player_pos
@@ -672,9 +746,37 @@ def main() -> None:
                 status = snapshot.status_lookup.get((nx, ny))
                 if not status:
                     continue
-                _au_char, _enemy_flag, enemy_units, friendly_units, *_rest = status
-                if enemy_units and not friendly_units:
+                _au_char, enemy_flag, enemy_units, friendly_units, *_rest = status
+                # Enemy present (unit or city) and no friendly stack blocking.
+                if (enemy_flag or enemy_units) and not friendly_units:
                     enemy_targets.append((idx, nx, ny))
+
+            # Force an attack if any adjacent enemy is present to concentrate fire.
+            if enemy_targets:
+                idx, nx, ny = enemy_targets[0]
+                enemy_val = enemy_strengths.get((nx, ny), 0.0)
+                self_val = unit_strengths.get(unit_type_labels.get(unit_id, ""), 0.0)
+                # Cities usually aren't in the strength map; treat enemy_val<=0 as city/unknown and attack.
+                if enemy_val <= 0 or self_val >= enemy_val * 0.9:
+                    success = client.attack_target(unit_id, nx, ny)
+                    print(
+                        f"[step {steps}] unit={unit_desc} attack target=({nx},{ny}) dir_idx={idx} "
+                        f"strength_self={self_val:.2f} enemy={enemy_val:.2f} success={success}"
+                    )
+                else:
+                    success = False
+                    print(
+                        f"[step {steps}] unit={unit_desc} skip attack; enemy stronger "
+                        f"(self={self_val:.2f} enemy={enemy_val:.2f})"
+                    )
+                print(
+                    f"[step {steps}] unit={unit_desc} attack target=({nx},{ny}) dir_idx={idx} success={success}"
+                )
+                previous_pos[unit_id] = snapshot.player_pos
+                time.sleep(args.sleep)
+                steps += 1
+                acted_this_turn = True
+                continue
 
             board_state = build_state(map_cfg, snapshot)
             canonical = CanonicalBoard(board_state, 1)
@@ -688,6 +790,7 @@ def main() -> None:
                 movement,
                 visited_tiles,
                 previous_pos.get(unit_id),
+                target_coord=known_enemy_target,
                 valid_actions=valid_actions,
             )
 
@@ -697,6 +800,7 @@ def main() -> None:
                     movement=movement,
                     previous_pos=previous_pos.get(unit_id),
                     dir_ids=dir_ids,
+                    target_coord=known_enemy_target,
                 )
                 if fallback_dir is not None:
                     success = client.move_dir_id(unit_id, fallback_dir)
@@ -755,8 +859,6 @@ def main() -> None:
                     print(
                         f"[step {steps}] unit={unit_desc} set research tech={tech_name} success={success}"
                     )
-                    if tech_name == TARGET_TECH_NAME:
-                        research_confirmed_complete = is_target_researched(client, player_id)
                 previous_pos[unit_id] = None
             elif 0 <= action < len(dir_ids):
                 dir_id = dir_ids[action]
@@ -786,7 +888,7 @@ def main() -> None:
                     controlled_units.remove(uid)
                     previous_pos.pop(uid, None)
         owned_cities = discover_player_cities(client, player_id)
-        if research_confirmed_complete and owned_cities:
+        if owned_cities:
             for cid, _cx, _cy in owned_cities:
                 if cid in queued_city_production:
                     continue
