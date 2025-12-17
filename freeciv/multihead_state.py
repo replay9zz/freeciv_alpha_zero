@@ -23,6 +23,7 @@ class MHUnit:
     atk: int
     df: int
     alive: bool = True
+    can_build_city: bool = False
 
 
 @dataclass
@@ -44,6 +45,7 @@ class MultiheadState:
     turn: int = 0
     actions_this_turn: int = 0
     max_actions_per_turn: int = 0
+    kills: Dict[Player, int] = field(default_factory=lambda: {1: 0, -1: 0})
     winner: Optional[Player] = None
     terminal_reason: Optional[str] = None
 
@@ -59,8 +61,11 @@ class MultiheadState:
         # Head sizes
         self.MOVE_SIZE = self.max_units * self.MOVE_PER_UNIT
         self.ATTACK_SIZE = self.max_units * self.ATTACK_PER_UNIT
-        # Econ head contains research actions and a pass/turn-end action.
-        self.ECON_SIZE = len(self.RESEARCH_TECHS) + 1
+        # Econ head contains research actions, build-city actions (per unit slot), and a pass/turn-end action.
+        self.ECON_RESEARCH_OFFSET = 0
+        self.ECON_BUILD_CITY_OFFSET = len(self.RESEARCH_TECHS)
+        self.ECON_PASS_OFFSET = len(self.RESEARCH_TECHS) + self.max_units
+        self.ECON_SIZE = len(self.RESEARCH_TECHS) + self.max_units + 1
         self.ACTION_SIZE = self.MOVE_SIZE + self.ATTACK_SIZE + self.ECON_SIZE
         self.PASS_ACTION = self.ACTION_SIZE - 1  # last index in econ head
         # Allow multiple actions within the same logical turn; cap to avoid stalling.
@@ -82,6 +87,7 @@ class MultiheadState:
         self.terminal_reason = None
         self.units = {1: [], -1: []}
         self.research_done = self._init_research_status()
+        self.kills = {1: 0, -1: 0}
         self._spawn_units()
 
     def _spawn_units(self) -> None:
@@ -134,13 +140,14 @@ class MultiheadState:
         new.movement = self.movement
         new.gt = self.gt.copy() if self.gt else None
         new.units = {
-            p: [MHUnit(u.x, u.y, u.hp, u.atk, u.df, u.alive) for u in lst]
+            p: [MHUnit(u.x, u.y, u.hp, u.atk, u.df, u.alive, u.can_build_city) for u in lst]
             for p, lst in self.units.items()
         }
         new.research_done = {p: dict(flags) for p, flags in self.research_done.items()}
         new.turn = self.turn
         new.actions_this_turn = self.actions_this_turn
         new.max_actions_per_turn = self.max_actions_per_turn
+        new.kills = dict(self.kills)
         new.winner = self.winner
         new.terminal_reason = self.terminal_reason
         new.RESEARCH_TECHS = self.RESEARCH_TECHS
@@ -149,6 +156,9 @@ class MultiheadState:
         new.MOVE_SIZE = self.MOVE_SIZE
         new.ATTACK_SIZE = self.ATTACK_SIZE
         new.ECON_SIZE = self.ECON_SIZE
+        new.ECON_RESEARCH_OFFSET = self.ECON_RESEARCH_OFFSET
+        new.ECON_BUILD_CITY_OFFSET = self.ECON_BUILD_CITY_OFFSET
+        new.ECON_PASS_OFFSET = self.ECON_PASS_OFFSET
         new.ACTION_SIZE = self.ACTION_SIZE
         new.PASS_ACTION = self.PASS_ACTION
         return new
@@ -170,13 +180,24 @@ class MultiheadState:
                 if nx is None or ny is None:
                     continue
                 if self.gt and 0 <= ny < self.cfg.map_h and 0 <= nx < self.cfg.map_w and self.gt.au_map[ny, nx] == 'A':
-                    moves[move_base + dir_idx] = 1  # move
-                    moves[atk_base + dir_idx] = 1  # attack
+                    # move only if not blocked by friendly
+                    if self._unit_at(nx, ny, player) is None:
+                        moves[move_base + dir_idx] = 1
+                    # attack only if an enemy occupies the target
+                    if self._unit_at(nx, ny, -player) is not None:
+                        moves[atk_base + dir_idx] = 1
         # research actions (one-time per tech)
         offset = self.MOVE_SIZE + self.ATTACK_SIZE
         for idx, tech in enumerate(self.RESEARCH_TECHS):
             if not self.research_done[player].get(tech, False):
                 moves[offset + idx] = 1
+        # build city actions (per unit slot)
+        build_offset = offset + self.ECON_BUILD_CITY_OFFSET
+        for idx in range(self.max_units):
+            u = self.units[player][idx] if idx < len(self.units[player]) else None
+            if u is None or not u.alive or not u.can_build_city:
+                continue
+            moves[build_offset + idx] = 1
         # pass always valid
         moves[self.PASS_ACTION] = 1
         return moves
@@ -198,14 +219,21 @@ class MultiheadState:
             dir_idx = rel % self.ATTACK_PER_UNIT
             self._handle_unit_action(player, unit_idx, dir_idx, is_attack=True)
         else:
-            research_idx = action - (self.MOVE_SIZE + self.ATTACK_SIZE)
-            if 0 <= research_idx < len(self.RESEARCH_TECHS):
-                tech = self.RESEARCH_TECHS[research_idx]
+            econ_idx = action - (self.MOVE_SIZE + self.ATTACK_SIZE)
+            # research
+            if 0 <= econ_idx < len(self.RESEARCH_TECHS):
+                tech = self.RESEARCH_TECHS[econ_idx]
                 if not self.research_done[player].get(tech, False):
                     self.research_done[player][tech] = True
-                    if tech == TARGET_TECH_NAME:
-                        # small bonus for reaching target tech
-                        pass
+                # small bonus hooks can be added later
+            # build city (per unit slot)
+            elif self.ECON_BUILD_CITY_OFFSET <= econ_idx < self.ECON_PASS_OFFSET:
+                unit_idx = econ_idx - self.ECON_BUILD_CITY_OFFSET
+                if unit_idx < len(self.units[player]):
+                    u = self.units[player][unit_idx]
+                    if u.alive and u.can_build_city:
+                        # For now, treat building a city as consuming the settler unit.
+                        u.alive = False
         self._resolve_terminal()
         # Stay in the same turn unless we exceed the per-turn action cap.
         self.actions_this_turn += 1
@@ -235,6 +263,12 @@ class MultiheadState:
         defender.hp -= attacker.atk
         if defender.hp <= 0:
             defender.alive = False
+            # Credit the kill to the attacker side.
+            for side, lst in self.units.items():
+                if defender in lst:
+                    self.kills[1 if side == 1 else -1] += 0  # defender side; attacker credited below
+                    break
+            self.kills[1 if attacker in self.units[1] else -1] += 1
         else:
             attacker.hp -= max(1, defender.df)
             if attacker.hp <= 0:
@@ -265,6 +299,32 @@ class MultiheadState:
         if self.turn >= self.cfg.max_turns and self.winner is None:
             self.winner = 0
             self.terminal_reason = "max_turns"
+
+    def _alive_count(self, player: Player) -> int:
+        return sum(1 for u in self.units[player] if u.alive)
+
+    def _hp_sum(self, player: Player) -> int:
+        return sum(u.hp for u in self.units[player] if u.alive)
+
+    def heuristic_score(self, player: Player) -> int:
+        """
+        Heuristic tiebreak when no explicit winner:
+        1) kill diff
+        2) alive unit count diff
+        3) hp sum diff
+        returns +1 if player leads, -1 if behind, 0 if equal.
+        """
+        opp = -player
+        kd = self.kills[player] - self.kills[opp]
+        if kd != 0:
+            return 1 if kd > 0 else -1
+        ad = self._alive_count(player) - self._alive_count(opp)
+        if ad != 0:
+            return 1 if ad > 0 else -1
+        hd = self._hp_sum(player) - self._hp_sum(opp)
+        if hd != 0:
+            return 1 if hd > 0 else -1
+        return 0
 
     # ---------- encodings ----------
     def encode(self, perspective: Player) -> np.ndarray:
@@ -314,4 +374,5 @@ class MultiheadState:
             parts.append(f"r{p}:{res_bits}")
         if self.winner is not None:
             parts.append(f"winner={self.winner}")
+        parts.append(f"kills:{self.kills.get(1,0)}/{self.kills.get(-1,0)}")
         return '|'.join(parts)

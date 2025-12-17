@@ -68,15 +68,23 @@ class MultiheadGame(Game):
 
     def getGameEnded(self, board, player):
         state, actual_player = self._unwrap(board, player)
-        if state.winner is None and state.turn < self.cfg.max_turns:
-            return 0
+        # If an explicit winner is set, honor it.
         if state.winner == 1:
             score = 1.0
         elif state.winner == -1:
             score = -1.0
+        elif state.winner == 0 or state.turn >= self.cfg.max_turns:
+            # Use heuristic tiebreakers on max-turn or mutual destruction.
+            hs = state.heuristic_score(actual_player)
+            if hs > 0:
+                score = 1.0
+            elif hs < 0:
+                score = -1.0
+            else:
+                score = self.cfg.draw_value
         else:
-            # Draw or max-turn timeout
-            score = self.cfg.draw_value
+            # Game still ongoing
+            return 0
         return score if actual_player == 1 else -score
 
     def getCanonicalForm(self, board, player):

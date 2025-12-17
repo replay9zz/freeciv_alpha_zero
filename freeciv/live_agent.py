@@ -54,10 +54,12 @@ except Exception:
 from freeciv_alpha_zero.freeciv.config import MapConfig
 from freeciv_alpha_zero.freeciv.train import load_tech_unlocks, unit_value
 from freeciv_alpha_zero.freeciv.game import CanonicalBoard, FreecivGame
+from freeciv_alpha_zero.freeciv.multihead_game import MultiheadGame
+from freeciv_alpha_zero.freeciv.multihead_state import MHUnit, MultiheadState
 from freeciv_alpha_zero.freeciv.nnet import NNetWrapper
 from freeciv_alpha_zero.freeciv.providers import GroundTruth
 from freeciv_alpha_zero.freeciv.state import FreecivBoardState
-from freeciv_alpha_zero.freeciv.research_policy import TARGET_TECH_NAME
+from freeciv_alpha_zero.freeciv.research_policy import TARGET_TECH_NAME, TECH_PREREQS
 from freeciv_alpha_zero.freeciv.explore_policy import (
     choose_action,
     fallback_move_direction,
@@ -266,6 +268,29 @@ def queue_city_production(
         print(f"[production] choose {target_name} (unlocked={research_flags.get(unit_values.get(target_name, ('',0))[0], True)})")
     return client.set_city_production(city_id, "UnitType", target_name)
 
+def query_player_research(client: LuaRemoteClient, player_id: int) -> str:
+    """
+    Return '__TECH__ <RuleName>' or '__NORESEARCH__' for the player's current research target.
+    Uses a direct Lua query to avoid helper return wrappers.
+    """
+    lua = (
+        "return (function() "
+        f"local pl = find.player and find.player({player_id}); "
+        "if not pl or not pl.researching then return '__NORESEARCH__' end; "
+        "local ok, tech = pcall(function() return pl:researching() end); "
+        "if not ok or not tech then return '__NORESEARCH__' end; "
+        "local ok2, name = pcall(function() return tech:rule_name() end); "
+        "if ok2 and name and name ~= '' then return '__TECH__ '..name end; "
+        "return '__NORESEARCH__' "
+        "end)()"
+    )
+    try:
+        res = client.eval(lua)
+        val = res.last_return() if res else None
+        return val if isinstance(val, str) else "__NORESEARCH__"
+    except Exception:
+        return "__NORESEARCH__"
+
 
 def set_research_to_target(
     client: LuaRemoteClient,
@@ -291,12 +316,8 @@ def set_research_to_target(
     try:
         ok = set_player_research(client, player_id, tech_name)
         # Log what actually got set after the request.
-        actual = None
-        try:
-            actual = get_player_research(client, player_id)
-        except Exception:
-            actual = None
-        print(f"[research] request={tech_name} actual={actual} success={ok}")
+        actual = query_player_research(client, player_id)
+        print(f"[research] request={tech_name} current={actual} ok={ok}")
         return ok
     except Exception:
         return False
@@ -354,6 +375,65 @@ def build_state(cfg: MapConfig, snapshot: Snapshot) -> FreecivBoardState:
     return state
 
 
+def build_multihead_state(
+    cfg: MapConfig,
+    snapshot: Snapshot,
+    unit_positions: List[Tuple[int, int]],
+    unit_can_build_city: List[bool],
+    max_units: int,
+) -> MultiheadState:
+    """
+    Best-effort adapter from live Snapshot -> MultiheadState for inference.
+    This does not query full unit stats; it uses simple constant stats.
+    """
+    state = MultiheadState.__new__(MultiheadState)  # type: ignore[misc]
+    state.cfg = cfg
+    state.provider = None
+    state.max_units = max_units
+    state.rng = np.random.default_rng()
+    state.movement = FreecivMovement(cfg.map_w, cfg.map_h)
+    state.gt = GroundTruth(snapshot.au_map.copy(), snapshot.enemy_map.copy())
+    state.units = {1: [], -1: []}
+    state.research_done = {1: {}, -1: {}}
+    state.turn = 0
+    state.actions_this_turn = 0
+    state.max_actions_per_turn = max(1, max_units * 2)
+    state.winner = None
+    state.terminal_reason = None
+
+    state.RESEARCH_TECHS = MultiheadState.RESEARCH_TECHS
+    state.MOVE_PER_UNIT = MultiheadState.MOVE_PER_UNIT
+    state.ATTACK_PER_UNIT = MultiheadState.ATTACK_PER_UNIT
+
+    # Friendly unit slots.
+    for (x, y), can_build in zip(unit_positions[:max_units], unit_can_build_city[:max_units]):
+        state.units[1].append(MHUnit(int(x), int(y), 10, 2, 1, True, bool(can_build)))
+    while len(state.units[1]) < max_units:
+        state.units[1].append(MHUnit(0, 0, 0, 0, 0, False, False))
+
+    # Enemy unit slots (approximate from known enemy tiles).
+    enemy_coords = [(int(x), int(y)) for (y, x) in np.argwhere(snapshot.enemy_map)]
+    for x, y in enemy_coords[:max_units]:
+        state.units[-1].append(MHUnit(int(x), int(y), 10, 2, 1, True, False))
+    while len(state.units[-1]) < max_units:
+        state.units[-1].append(MHUnit(0, 0, 0, 0, 0, False, False))
+
+    state.research_done = {
+        1: {tech: snapshot.research_flags.get(tech, False) for tech in state.RESEARCH_TECHS},
+        -1: {tech: False for tech in state.RESEARCH_TECHS},
+    }
+
+    state.MOVE_SIZE = max_units * state.MOVE_PER_UNIT
+    state.ATTACK_SIZE = max_units * state.ATTACK_PER_UNIT
+    state.ECON_RESEARCH_OFFSET = 0
+    state.ECON_BUILD_CITY_OFFSET = len(state.RESEARCH_TECHS)
+    state.ECON_PASS_OFFSET = len(state.RESEARCH_TECHS) + max_units
+    state.ECON_SIZE = len(state.RESEARCH_TECHS) + max_units + 1
+    state.ACTION_SIZE = state.MOVE_SIZE + state.ATTACK_SIZE + state.ECON_SIZE
+    state.PASS_ACTION = state.ACTION_SIZE - 1
+    return state
+
+
 def gather_snapshot(
     client: LuaRemoteClient,
     movement: FreecivMovement,
@@ -364,6 +444,8 @@ def gather_snapshot(
     known_enemy: Dict[Tuple[int, int], bool],
     visited_tiles: Set[Tuple[int, int]],
 ) -> Tuple[Snapshot, Optional[int]]:
+    # Clear stale enemy info; we'll repopulate from current vision.
+    known_enemy.clear()
     pos_result = client.eval(simple_find_unit_pos(unit_id))
     pos_info = parse_position_result(pos_result)
     if pos_info is None:
@@ -377,18 +459,7 @@ def gather_snapshot(
     research_flags: Dict[str, bool] = {tech: False for tech in FreecivBoardState.RESEARCH_TECHS}
     if player_id is not None:
         try:
-            # Use a direct call to avoid mis-detection
-            research_name = client.eval(
-                "return (function() "
-                f"local pl = find.player and find.player({player_id}); "
-                "if not pl or not pl.researching then return '__NORESEARCH__' end; "
-                "local ok, tech = pcall(function() return pl:researching() end); "
-                "if not ok or not tech then return '__NORESEARCH__' end; "
-                "local ok2, name = pcall(function() return tech:rule_name() end); "
-                "if ok2 and name and name ~= '' then return '__TECH__ '..name end; "
-                "return '__NORESEARCH__' "
-                "end)()"
-            ).last_return()
+            research_name = query_player_research(client, player_id)
         except Exception:
             research_name = None
         try:
@@ -555,6 +626,353 @@ def load_network(checkpoint: Path, map_cfg: MapConfig) -> NNetWrapper:
     return nnet
 
 
+def load_network_multihead(checkpoint: Path, map_cfg: MapConfig, max_units: int) -> tuple[MultiheadGame, NNetWrapper]:
+    game = MultiheadGame(map_cfg, max_units=max_units)
+    nnet = NNetWrapper(game)
+    folder = str(checkpoint.parent) if checkpoint.parent != Path("") else "."
+    try:
+        nnet.load_checkpoint(folder, checkpoint.name)
+    except RuntimeError as exc:
+        raise RuntimeError(
+            "Failed to load multihead checkpoint into network with map size "
+            f"{map_cfg.map_w}x{map_cfg.map_h}."
+        ) from exc
+    return game, nnet
+
+
+def run_multihead_agent(
+    *,
+    args: argparse.Namespace,
+    client: LuaRemoteClient,
+    game: MultiheadGame,
+    nnet: NNetWrapper,
+    map_cfg: MapConfig,
+    dir_ids: List[int],
+    tech_weights: Dict[str, float],
+    unit_type_labels: Dict[int, str],
+    unit_values: Dict[str, Tuple[str, float]],
+    player_id: Optional[int],
+    controlled_units: List[int],
+    movement: FreecivMovement,
+    known_tiles: Dict[Tuple[int, int], str],
+    known_enemy: Dict[Tuple[int, int], bool],
+    visited_tiles: Set[Tuple[int, int]],
+) -> None:
+    steps = 0
+    turns = 0
+    queued_city_production: Set[int] = set()
+    last_research_flags: Dict[str, bool] = {}
+
+    def can_research_now(tech_name: str, flags: Dict[str, bool]) -> bool:
+        """
+        Allow research only if all prerequisites are already known.
+        """
+        reqs = TECH_PREREQS.get(tech_name, [])
+        return all(flags.get(req, False) for req in reqs)
+    while steps < args.max_steps and turns < map_cfg.max_turns:
+        controlled_units, player_id = discover_controlled_units(client, player_id)
+        controlled_units = sorted(controlled_units)
+        owned_cities = discover_player_cities(client, player_id)
+        if not controlled_units:
+            # No active units (e.g., settler was consumed founding a city). Keep the game progressing
+            # so production/research can create new units.
+            if owned_cities:
+                set_research_to_target(client, player_id, research_flags={})
+                for cid, _cx, _cy in owned_cities:
+                    if cid in queued_city_production:
+                        continue
+                    queued = queue_city_production(client, cid, research_flags={}, unit_values=unit_values)
+                    print(f"[production] city={cid} queued={queued}")
+                    if queued:
+                        queued_city_production.add(cid)
+                client.end_turn()
+                turns += 1
+                time.sleep(args.sleep)
+                continue
+            break
+
+        # Update knowledge using the first unit as vision anchor.
+        try:
+            snapshot, player_id = gather_snapshot(
+                client=client,
+                movement=movement,
+                cfg=map_cfg,
+                unit_id=controlled_units[0],
+                player_id=player_id,
+                known_tiles=known_tiles,
+                known_enemy=known_enemy,
+                visited_tiles=visited_tiles,
+            )
+        except RuntimeError:
+            # Likely the unit died; refresh unit list and continue the outer loop.
+            controlled_units, player_id = discover_controlled_units(client, player_id)
+            controlled_units = sorted(controlled_units)
+            if not controlled_units:
+                # No units left; let the outer loop handle city-only flow on next iteration.
+                continue
+            # Try again on the next loop iteration with the refreshed unit list.
+            continue
+        visited_tiles.add(snapshot.player_pos)
+        if last_research_flags and snapshot.research_flags != last_research_flags:
+            queued_city_production.clear()
+        last_research_flags = dict(snapshot.research_flags)
+
+        # Ensure production is queued for each owned city at least once (and after tech changes).
+        for cid, _cx, _cy in owned_cities:
+            if cid in queued_city_production:
+                continue
+            queued = queue_city_production(client, cid, research_flags=snapshot.research_flags, unit_values=unit_values)
+            print(f"[production] city={cid} queued={queued}")
+            if queued:
+                queued_city_production.add(cid)
+
+        # Gather current positions for all controlled units.
+        unit_positions: List[Tuple[int, int]] = []
+        for uid in controlled_units:
+            pos_result = client.eval(simple_find_unit_pos(uid))
+            pos_info = parse_position_result(pos_result)
+            if pos_info is None:
+                continue
+            unit_positions.append((pos_info[0], pos_info[1]))
+
+        current_research: Optional[str] = None
+        if isinstance(snapshot.research_name, str) and snapshot.research_name.startswith("__TECH__"):
+            current_research = snapshot.research_name.replace("__TECH__", "", 1).strip() or None
+
+        econ_used_this_turn = False
+
+        # Execute up to K actions, then end turn.
+        for _ in range(max(1, args.max_units * 2)):
+            unit_can_build_city = [
+                ("settler" in (unit_type_labels.get(uid, "") or "").lower()) for uid in controlled_units
+            ]
+            board_state = build_multihead_state(
+                map_cfg,
+                snapshot,
+                unit_positions,
+                unit_can_build_city=unit_can_build_city,
+                max_units=args.max_units,
+            )
+            canonical = game.getCanonicalForm(board_state, 1)
+            pi, _v = nnet.predict(canonical)
+            valids = board_state.valid_moves(1)
+
+            econ_offset = board_state.MOVE_SIZE + board_state.ATTACK_SIZE
+            research_slice = slice(econ_offset, econ_offset + board_state.ECON_BUILD_CITY_OFFSET)
+            build_city_slice = slice(
+                econ_offset + board_state.ECON_BUILD_CITY_OFFSET,
+                econ_offset + board_state.ECON_PASS_OFFSET,
+            )
+
+            # Do not spam research when no city exists (but allow build-city).
+            if not owned_cities:
+                valids[research_slice] = 0
+
+            # Mask out techs whose prereqs are not yet known.
+            for idx, tech_name in enumerate(board_state.RESEARCH_TECHS):
+                if not can_research_now(tech_name, snapshot.research_flags):
+                    aidx = econ_offset + idx
+                    if 0 <= aidx < len(valids):
+                        valids[aidx] = 0
+
+            # Do not switch research mid-progress: if already researching something, disable all research changes.
+            if current_research:
+                valids[research_slice] = 0
+
+            # Avoid wasting actions: if already researching the selected tech, treat it as invalid.
+            if current_research:
+                for idx, tech_name in enumerate(board_state.RESEARCH_TECHS):
+                    if tech_name == current_research:
+                        aidx = econ_offset + idx
+                        if 0 <= aidx < len(valids):
+                            valids[aidx] = 0
+
+            # Limit econ actions to at most one per Freeciv turn (except PASS).
+            if econ_used_this_turn:
+                valids[econ_offset : board_state.PASS_ACTION] = 0
+
+            # Optional tech weights.
+            if tech_weights:
+                for idx, tech_name in enumerate(board_state.RESEARCH_TECHS):
+                    w = tech_weights.get(tech_name)
+                    if w is None:
+                        continue
+                    aidx = econ_offset + idx
+                    if 0 <= aidx < len(pi):
+                        pi[aidx] *= w
+
+            def choose_with_priority() -> int:
+                # Option A (turn-aware):
+                # - If no city exists, prioritize BUILD_CITY (if available) to bootstrap the economy.
+                # - If no research is set yet and econ hasn't been used this turn, choose an econ action once.
+                # - Otherwise: attack > move > econ(pass).
+                if not owned_cities:
+                    m_build = pi[build_city_slice] * valids[build_city_slice]
+                    if m_build.sum() > 0:
+                        return int(build_city_slice.start + np.argmax(m_build))
+
+                if owned_cities and not econ_used_this_turn and not current_research:
+                    m_econ = pi[research_slice] * valids[research_slice]
+                    if m_econ.sum() > 0:
+                        return int(research_slice.start + np.argmax(m_econ))
+
+                slices = [
+                    (board_state.MOVE_SIZE, board_state.MOVE_SIZE + board_state.ATTACK_SIZE),
+                    (0, board_state.MOVE_SIZE),
+                    (econ_offset, board_state.ACTION_SIZE),
+                ]
+                for start, end in slices:
+                    m = pi[start:end] * valids[start:end]
+                    if m.sum() > 0:
+                        return int(start + np.argmax(m))
+                return int(np.argmax(valids))
+
+            action = choose_with_priority()
+
+            if action == board_state.PASS_ACTION:
+                break
+
+            # Research action.
+            if action >= board_state.MOVE_SIZE + board_state.ATTACK_SIZE:
+                rel = action - econ_offset
+                # research
+                if 0 <= rel < len(board_state.RESEARCH_TECHS):
+                    tech_name = board_state.RESEARCH_TECHS[rel]
+                    if not can_research_now(tech_name, snapshot.research_flags):
+                        print(f"[turn {turns}] research={tech_name} blocked (prereqs unmet)")
+                        break
+                    success = set_research_to_target(
+                        client,
+                        player_id,
+                        research_flags=snapshot.research_flags,
+                        tech_name=tech_name,
+                    )
+                    actual = query_player_research(client, player_id)
+                    print(f"[turn {turns}] research={tech_name} ok={success} current={actual}")
+                    if not isinstance(actual, str) or tech_name not in (actual or ""):
+                        # If it didn't stick, treat as failed and skip further econ this turn.
+                        econ_used_this_turn = True
+                        break
+                    steps += 1
+                    econ_used_this_turn = True
+                # build city (per unit slot)
+                elif board_state.ECON_BUILD_CITY_OFFSET <= rel < board_state.ECON_PASS_OFFSET:
+                    unit_idx = rel - board_state.ECON_BUILD_CITY_OFFSET
+                    if unit_idx < len(controlled_units):
+                        unit_id = controlled_units[unit_idx]
+                        unit_desc = format_unit_label(unit_id, unit_type_labels)
+                        city_name = f"AutoCity{len(owned_cities) + 1}"
+                        built = client.found_city(unit_id, city_name)
+                        action_desc = f"founded city '{city_name}'"
+                        if not built:
+                            built = client.build_city(unit_id)
+                            action_desc = "built a city"
+                        print(f"[turn {turns}] unit={unit_desc} {action_desc} success={built}")
+                        steps += 1
+                        econ_used_this_turn = True
+                        if built:
+                            # Settler is typically consumed; refresh controllable units.
+                            controlled_units, player_id = discover_controlled_units(client, player_id)
+                            controlled_units = sorted(controlled_units)
+                else:
+                    break
+
+                # Refresh snapshot after econ actions as well.
+                if not controlled_units:
+                    break
+                snapshot, player_id = gather_snapshot(
+                    client=client,
+                    movement=movement,
+                    cfg=map_cfg,
+                    unit_id=controlled_units[0],
+                    player_id=player_id,
+                    known_tiles=known_tiles,
+                    known_enemy=known_enemy,
+                    visited_tiles=visited_tiles,
+                )
+                visited_tiles.add(snapshot.player_pos)
+                owned_cities = discover_player_cities(client, player_id)
+                if isinstance(snapshot.research_name, str) and snapshot.research_name.startswith("__TECH__"):
+                    current_research = snapshot.research_name.replace("__TECH__", "", 1).strip() or None
+                unit_positions = []
+                for uid in controlled_units:
+                    pos_result = client.eval(simple_find_unit_pos(uid))
+                    pos_info = parse_position_result(pos_result)
+                    if pos_info is None:
+                        continue
+                    unit_positions.append((pos_info[0], pos_info[1]))
+                time.sleep(args.sleep)
+                continue
+
+            # Move/attack action.
+            is_attack = action >= board_state.MOVE_SIZE
+            if is_attack:
+                rel = action - board_state.MOVE_SIZE
+                unit_idx = rel // board_state.ATTACK_PER_UNIT
+                dir_idx = rel % board_state.ATTACK_PER_UNIT
+            else:
+                unit_idx = action // board_state.MOVE_PER_UNIT
+                dir_idx = action % board_state.MOVE_PER_UNIT
+
+            if unit_idx >= len(controlled_units):
+                break
+            unit_id = controlled_units[unit_idx]
+            unit_desc = format_unit_label(unit_id, unit_type_labels)
+            if is_attack:
+                if unit_idx < len(unit_positions):
+                    ux, uy = unit_positions[unit_idx]
+                    neighbors = movement.get_native_neighbors(int(ux), int(uy))
+                    tx, ty = neighbors[dir_idx]
+                else:
+                    tx = ty = None
+                if tx is None or ty is None:
+                    success = False
+                else:
+                    success = client.attack_target(unit_id, int(tx), int(ty))
+                print(f"[turn {turns}] attack unit={unit_desc} dir_idx={dir_idx} target=({tx},{ty}) success={success}")
+                steps += 1
+            else:
+                dir_id = dir_ids[dir_idx]
+                success = client.move_dir_id(unit_id, dir_id)
+                print(f"[turn {turns}] move unit={unit_desc} dir_id={dir_id} success={success}")
+                steps += 1
+
+            # Refresh snapshot after acting.
+            try:
+                snapshot, player_id = gather_snapshot(
+                    client=client,
+                    movement=movement,
+                    cfg=map_cfg,
+                    unit_id=unit_id,
+                    player_id=player_id,
+                    known_tiles=known_tiles,
+                    known_enemy=known_enemy,
+                    visited_tiles=visited_tiles,
+                )
+            except RuntimeError:
+                # Unit likely died; refresh and break out of action loop to start a new turn.
+                controlled_units, player_id = discover_controlled_units(client, player_id)
+                controlled_units = sorted(controlled_units)
+                break
+            visited_tiles.add(snapshot.player_pos)
+            owned_cities = discover_player_cities(client, player_id)
+            if isinstance(snapshot.research_name, str) and snapshot.research_name.startswith("__TECH__"):
+                current_research = snapshot.research_name.replace("__TECH__", "", 1).strip() or None
+            unit_positions = []
+            for uid in controlled_units:
+                pos_result = client.eval(simple_find_unit_pos(uid))
+                pos_info = parse_position_result(pos_result)
+                if pos_info is None:
+                    continue
+                unit_positions.append((pos_info[0], pos_info[1]))
+            time.sleep(args.sleep)
+
+        client.end_turn()
+        turns += 1
+
+    print(f"Completed {steps} steps across {turns} turns; exiting.")
+
+
 def main() -> None:
     ap = argparse.ArgumentParser(description="Run a trained Freeciv AlphaZero model via LuaRemote.")
     ap.add_argument('--host', default='127.0.0.1')
@@ -563,6 +981,8 @@ def main() -> None:
     ap.add_argument('--unit-id', type=int, help='Control a single unit id (disables auto-discovery).')
     ap.add_argument('--player-id', type=int, help='Restrict auto-discovery to a specific player id.')
     ap.add_argument('--checkpoint', required=True)
+    ap.add_argument('--mode', choices=['default', 'multihead'], default='default')
+    ap.add_argument('--max-units', type=int, default=4, help='Max unit slots for multihead mode')
     ap.add_argument('--map-width', type=int, default=9)
     ap.add_argument('--map-height', type=int, default=9)
     ap.add_argument('--max-turns', type=int, default=64)
@@ -587,7 +1007,11 @@ def main() -> None:
     dir_ids = parse_dir_ids(args.dir_ids)
     tech_weights = parse_tech_weights(args.tech_weight)
     map_cfg = MapConfig(map_w=args.map_width, map_h=args.map_height, max_turns=args.max_turns)
-    nnet = load_network(checkpoint_path, map_cfg)
+    game: MultiheadGame | None = None
+    if args.mode == "multihead":
+        game, nnet = load_network_multihead(checkpoint_path, map_cfg, max_units=args.max_units)
+    else:
+        nnet = load_network(checkpoint_path, map_cfg)
 
     client = LuaRemoteClient(args.host, args.port, timeout=args.timeout)
     client.connect()
@@ -638,6 +1062,28 @@ def main() -> None:
 
     steps = 0
     turns = 0
+
+    if args.mode == "multihead":
+        assert game is not None
+        run_multihead_agent(
+            args=args,
+            client=client,
+            game=game,
+            nnet=nnet,
+            map_cfg=map_cfg,
+            dir_ids=dir_ids,
+            tech_weights=tech_weights,
+            unit_type_labels=unit_type_labels,
+            unit_values=unit_values,
+            player_id=player_id,
+            controlled_units=controlled_units,
+            movement=movement,
+            known_tiles=known_tiles,
+            known_enemy=known_enemy,
+            visited_tiles=visited_tiles,
+        )
+        return
+
     while steps < args.max_steps:
         try:
             unit_type_labels = list_all_unit_types(client)

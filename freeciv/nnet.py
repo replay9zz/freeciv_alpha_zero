@@ -164,6 +164,34 @@ class NNetWrapper(NeuralNet):
                 else:
                     raise RuntimeError(f"Incompatible policy_head.bias shape: checkpoint {ck.shape}, expected {tgt.shape}")
 
+        # Multi-head models: allow expanding the econ head when new econ actions are inserted.
+        if 'policy_econ.weight' in state_dict and 'policy_econ.weight' in model_state:
+            ck = state_dict['policy_econ.weight']
+            tgt = model_state['policy_econ.weight']
+            if ck.shape != tgt.shape:
+                if ck.shape[1] == tgt.shape[1] and ck.shape[0] < tgt.shape[0] and ck.shape[0] >= 2:
+                    new_w = tgt.clone()
+                    # Preserve research rows (prefix) and map the old "pass" row to the new last row.
+                    new_w[: ck.shape[0] - 1, :] = ck[: ck.shape[0] - 1, :]
+                    new_w[-1, :] = ck[-1, :]
+                    updated['policy_econ.weight'] = new_w
+                    notes.append(f"policy_econ.weight {ck.shape} -> {tgt.shape}")
+                else:
+                    raise RuntimeError(f"Incompatible policy_econ.weight shape: checkpoint {ck.shape}, expected {tgt.shape}")
+
+        if 'policy_econ.bias' in state_dict and 'policy_econ.bias' in model_state:
+            ck = state_dict['policy_econ.bias']
+            tgt = model_state['policy_econ.bias']
+            if ck.shape != tgt.shape:
+                if ck.shape[0] < tgt.shape[0] and ck.shape[0] >= 2:
+                    new_b = tgt.clone()
+                    new_b[: ck.shape[0] - 1] = ck[: ck.shape[0] - 1]
+                    new_b[-1] = ck[-1]
+                    updated['policy_econ.bias'] = new_b
+                    notes.append(f"policy_econ.bias {ck.shape} -> {tgt.shape}")
+                else:
+                    raise RuntimeError(f"Incompatible policy_econ.bias shape: checkpoint {ck.shape}, expected {tgt.shape}")
+
         if notes:
             print("Adjusted checkpoint for newer model shape:", "; ".join(notes))
         return updated
