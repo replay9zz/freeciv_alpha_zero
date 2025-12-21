@@ -118,6 +118,7 @@ class MultiheadState:
     units: Dict[Player, List[MHUnit]] = field(default_factory=lambda: {1: [], -1: []})
     cities: Dict[Player, List[City]] = field(default_factory=lambda: {1: [], -1: []})
     research_done: Dict[Player, Dict[str, bool]] = field(default_factory=lambda: {1: {}, -1: {}})
+    visited: Dict[Player, np.ndarray] = field(default_factory=lambda: {1: None, -1: None})
     turn: int = 0
     actions_this_turn: int = 0
     max_actions_per_turn: int = 0
@@ -171,6 +172,10 @@ class MultiheadState:
         self.units = {1: [], -1: []}
         self.cities = {1: [], -1: []}
         self.research_done = self._init_research_status()
+        self.visited = {
+            1: np.zeros((self.cfg.map_h, self.cfg.map_w), dtype=bool),
+            -1: np.zeros((self.cfg.map_h, self.cfg.map_w), dtype=bool),
+        }
         self.kills = {1: 0, -1: 0}
         self.scores = {1: 0.0, -1: 0.0}
         self._spawn_units()
@@ -211,6 +216,10 @@ class MultiheadState:
             )
         )
         self._ensure_unit_slots()
+        for player in (1, -1):
+            for u in self.units[player]:
+                if u.alive:
+                    self.visited[player][u.y, u.x] = True
 
     def _ensure_unit_slots(self) -> None:
         for player in (1, -1):
@@ -293,6 +302,10 @@ class MultiheadState:
             for p, lst in self.cities.items()
         }
         new.research_done = {p: dict(flags) for p, flags in self.research_done.items()}
+        new.visited = {
+            1: self.visited[1].copy(),
+            -1: self.visited[-1].copy(),
+        }
         new.turn = self.turn
         new.actions_this_turn = self.actions_this_turn
         new.max_actions_per_turn = self.max_actions_per_turn
@@ -441,7 +454,9 @@ class MultiheadState:
             # Move if no friendly blocking
             if self._unit_at(nx, ny, player) is None:
                 u.x, u.y = nx, ny
-                self.scores[player] += self.cfg.move_reward
+                if not self.visited[player][ny, nx]:
+                    self.visited[player][ny, nx] = True
+                    self.scores[player] += self.cfg.move_reward
 
     def _attack(self, player: Player, attacker: MHUnit, defender: MHUnit) -> None:
         atk = max(1, attacker.atk)

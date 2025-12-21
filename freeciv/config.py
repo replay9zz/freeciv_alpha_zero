@@ -18,8 +18,8 @@ class MapConfig:
     wall_penalty: float = -0.15
     elimination_bonus: float = 3.0
     draw_value: float = -0.05
-    build_city_reward: float = 0.15
-    research_reward: float = 0.02
+    build_city_reward: float = 0.5
+    research_reward: float = 0.05
     # Optional per-tech rewards; falls back to research_reward when missing.
     research_reward_map: Dict[str, float] = field(default_factory=dict)
     move_reward: float = 0.02
