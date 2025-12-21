@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
+from pathlib import Path
 from typing import Dict, List, Optional, Tuple
 
 import numpy as np
@@ -10,9 +11,32 @@ from freeciv_rl.freeciv_movement import FreecivMovement
 from .config import MapConfig
 from .providers import BaseProvider, GroundTruth
 from .research_policy import RESEARCH_TECHS, TARGET_TECH_NAME
+from .train import load_tech_unlocks
 
 Player = int  # 1 or -1
 Coord = Tuple[int, int]
+
+
+@dataclass
+class UnitSpec:
+    name: str
+    atk: int
+    df: int
+    hp: int
+    firepower: int
+    moves: int
+    cost: int
+    can_build_city: bool = False
+
+
+@dataclass
+class City:
+    x: int
+    y: int
+    size: int = 1
+    food_storage: float = 0.0
+    production_target: Optional[str] = None
+    production_progress: float = 0.0
 
 
 @dataclass
@@ -22,8 +46,58 @@ class MHUnit:
     hp: int
     atk: int
     df: int
+    firepower: int
+    unit_type: str
     alive: bool = True
     can_build_city: bool = False
+    home_city: Optional[int] = None
+
+
+PRODUCTION_UNIT_NAMES: Tuple[str, ...] = (
+    "Settlers",
+    "Migrants",
+    "Workers",
+    "Warriors",
+    "Phalanx",
+    "Archers",
+    "Legion",
+    "Explorer",
+    "Trireme",
+    "Horsemen",
+    "Diplomat",
+)
+
+
+def _load_unit_specs() -> Tuple[Dict[str, UnitSpec], Dict[str, Optional[str]]]:
+    unlocks = load_tech_unlocks(
+        str(Path(__file__).resolve().parent / "data" / "tech_unlocks.yaml")
+    )
+    specs: Dict[str, UnitSpec] = {}
+    unit_tech: Dict[str, Optional[str]] = {}
+    for entry in unlocks:
+        tech = entry.get("tech")
+        for ent in entry.get("unlocks", []):
+            if ent.get("kind") != "unit":
+                continue
+            name = ent.get("name")
+            if name not in PRODUCTION_UNIT_NAMES:
+                continue
+            spec = UnitSpec(
+                name=name,
+                atk=int(ent.get("attack", 0)),
+                df=int(ent.get("defense", 0)),
+                hp=int(ent.get("hp", 1)),
+                firepower=int(ent.get("firepower", 1)),
+                moves=int(ent.get("moves", 1)),
+                cost=int(ent.get("cost", 1)),
+                can_build_city=name in {"Settlers", "Migrants"},
+            )
+            specs[name] = spec
+            unit_tech[name] = tech
+    return specs, unit_tech
+
+
+UNIT_SPECS, UNIT_TECH = _load_unit_specs()
 
 
 @dataclass
@@ -36,16 +110,19 @@ class MultiheadState:
     """
     cfg: MapConfig
     provider: BaseProvider
-    max_units: int = 4
+    max_units: int = 6
+    max_cities: int = 3
     rng: np.random.Generator = field(default_factory=np.random.default_rng)
     gt: GroundTruth | None = None
     movement: FreecivMovement | None = None
     units: Dict[Player, List[MHUnit]] = field(default_factory=lambda: {1: [], -1: []})
+    cities: Dict[Player, List[City]] = field(default_factory=lambda: {1: [], -1: []})
     research_done: Dict[Player, Dict[str, bool]] = field(default_factory=lambda: {1: {}, -1: {}})
     turn: int = 0
     actions_this_turn: int = 0
     max_actions_per_turn: int = 0
     kills: Dict[Player, int] = field(default_factory=lambda: {1: 0, -1: 0})
+    scores: Dict[Player, float] = field(default_factory=lambda: {1: 0.0, -1: 0.0})
     winner: Optional[Player] = None
     terminal_reason: Optional[str] = None
 
@@ -53,6 +130,7 @@ class MultiheadState:
     # For each unit slot: 6 move + 6 attack = 12 actions
     # After unit actions: research actions | pass
     RESEARCH_TECHS: Tuple[str, ...] = RESEARCH_TECHS
+    PRODUCTION_UNIT_NAMES: Tuple[str, ...] = PRODUCTION_UNIT_NAMES
     MOVE_PER_UNIT = 6
     ATTACK_PER_UNIT = 6
 
@@ -61,11 +139,16 @@ class MultiheadState:
         # Head sizes
         self.MOVE_SIZE = self.max_units * self.MOVE_PER_UNIT
         self.ATTACK_SIZE = self.max_units * self.ATTACK_PER_UNIT
-        # Econ head contains research actions, build-city actions (per unit slot), and a pass/turn-end action.
+        # Econ head contains research actions, build-city actions (per unit slot),
+        # production actions (per city slot), and a pass/turn-end action.
         self.ECON_RESEARCH_OFFSET = 0
         self.ECON_BUILD_CITY_OFFSET = len(self.RESEARCH_TECHS)
-        self.ECON_PASS_OFFSET = len(self.RESEARCH_TECHS) + self.max_units
-        self.ECON_SIZE = len(self.RESEARCH_TECHS) + self.max_units + 1
+        self.ECON_PRODUCTION_OFFSET = self.ECON_BUILD_CITY_OFFSET + self.max_units
+        self.PRODUCTION_UNIT_COUNT = len(PRODUCTION_UNIT_NAMES)
+        self.ECON_PASS_OFFSET = (
+            self.ECON_PRODUCTION_OFFSET + self.max_cities * self.PRODUCTION_UNIT_COUNT
+        )
+        self.ECON_SIZE = self.ECON_PASS_OFFSET + 1
         self.ACTION_SIZE = self.MOVE_SIZE + self.ATTACK_SIZE + self.ECON_SIZE
         self.PASS_ACTION = self.ACTION_SIZE - 1  # last index in econ head
         # Allow multiple actions within the same logical turn; cap to avoid stalling.
@@ -86,29 +169,66 @@ class MultiheadState:
         self.winner = None
         self.terminal_reason = None
         self.units = {1: [], -1: []}
+        self.cities = {1: [], -1: []}
         self.research_done = self._init_research_status()
         self.kills = {1: 0, -1: 0}
+        self.scores = {1: 0.0, -1: 0.0}
         self._spawn_units()
 
     def _spawn_units(self) -> None:
         assert self.gt is not None
-        # Simple mirrored spawns.
-        starts_me = [(0, 0), (0, self.cfg.map_h - 2), (1, self.cfg.map_h - 1), (1, 1)]
-        starts_opp = [(self.cfg.map_w - 1, self.cfg.map_h - 1), (self.cfg.map_w - 1, 1), (self.cfg.map_w - 2, 0), (self.cfg.map_w - 2, self.cfg.map_h - 2)]
-        stats = [
-            {"hp": 10, "atk": 2, "df": 1},  # warrior-ish
-            {"hp": 8, "atk": 3, "df": 1},   # archer-ish
-            {"hp": 12, "atk": 1, "df": 2},  # phalanx-ish
-            {"hp": 9, "atk": 2, "df": 2},   # balanced
-        ]
-        for idx in range(self.max_units):
-            sx, sy = starts_me[idx % len(starts_me)]
-            ox, oy = starts_opp[idx % len(starts_opp)]
-            st = stats[min(idx, len(stats) - 1)]
-            mx, my = self._find_spawn_near(sx, sy)
-            ox2, oy2 = self._find_spawn_near(ox, oy)
-            self.units[1].append(MHUnit(mx, my, st["hp"], st["atk"], st["df"]))
-            self.units[-1].append(MHUnit(ox2, oy2, st["hp"], st["atk"], st["df"]))
+        starts_me = [(0, 0)]
+        starts_opp = [(self.cfg.map_w - 1, self.cfg.map_h - 1)]
+        settler = UNIT_SPECS.get("Settlers")
+        if settler is None:
+            raise RuntimeError("Settlers unit spec missing from tech unlocks.")
+        mx, my = self._find_spawn_near(*starts_me[0])
+        ox, oy = self._find_spawn_near(*starts_opp[0])
+        self.units[1].append(
+            MHUnit(
+                mx,
+                my,
+                settler.hp,
+                settler.atk,
+                settler.df,
+                settler.firepower,
+                settler.name,
+                True,
+                settler.can_build_city,
+            )
+        )
+        self.units[-1].append(
+            MHUnit(
+                ox,
+                oy,
+                settler.hp,
+                settler.atk,
+                settler.df,
+                settler.firepower,
+                settler.name,
+                True,
+                settler.can_build_city,
+            )
+        )
+        self._ensure_unit_slots()
+
+    def _ensure_unit_slots(self) -> None:
+        for player in (1, -1):
+            while len(self.units[player]) < self.max_units:
+                self.units[player].append(
+                    MHUnit(
+                        0,
+                        0,
+                        0,
+                        0,
+                        0,
+                        1,
+                        "None",
+                        False,
+                        False,
+                        None,
+                    )
+                )
 
     def _find_spawn_near(self, sx: int, sy: int) -> Coord:
         assert self.gt is not None
@@ -136,18 +256,48 @@ class MultiheadState:
         new.cfg = self.cfg
         new.provider = self.provider
         new.max_units = self.max_units
+        new.max_cities = self.max_cities
         new.rng = self.rng
         new.movement = self.movement
         new.gt = self.gt.copy() if self.gt else None
         new.units = {
-            p: [MHUnit(u.x, u.y, u.hp, u.atk, u.df, u.alive, u.can_build_city) for u in lst]
+            p: [
+                MHUnit(
+                    u.x,
+                    u.y,
+                    u.hp,
+                    u.atk,
+                    u.df,
+                    u.firepower,
+                    u.unit_type,
+                    u.alive,
+                    u.can_build_city,
+                    u.home_city,
+                )
+                for u in lst
+            ]
             for p, lst in self.units.items()
+        }
+        new.cities = {
+            p: [
+                City(
+                    c.x,
+                    c.y,
+                    c.size,
+                    c.food_storage,
+                    c.production_target,
+                    c.production_progress,
+                )
+                for c in lst
+            ]
+            for p, lst in self.cities.items()
         }
         new.research_done = {p: dict(flags) for p, flags in self.research_done.items()}
         new.turn = self.turn
         new.actions_this_turn = self.actions_this_turn
         new.max_actions_per_turn = self.max_actions_per_turn
         new.kills = dict(self.kills)
+        new.scores = dict(self.scores)
         new.winner = self.winner
         new.terminal_reason = self.terminal_reason
         new.RESEARCH_TECHS = self.RESEARCH_TECHS
@@ -158,7 +308,9 @@ class MultiheadState:
         new.ECON_SIZE = self.ECON_SIZE
         new.ECON_RESEARCH_OFFSET = self.ECON_RESEARCH_OFFSET
         new.ECON_BUILD_CITY_OFFSET = self.ECON_BUILD_CITY_OFFSET
+        new.ECON_PRODUCTION_OFFSET = self.ECON_PRODUCTION_OFFSET
         new.ECON_PASS_OFFSET = self.ECON_PASS_OFFSET
+        new.PRODUCTION_UNIT_COUNT = self.PRODUCTION_UNIT_COUNT
         new.ACTION_SIZE = self.ACTION_SIZE
         new.PASS_ACTION = self.PASS_ACTION
         return new
@@ -193,11 +345,23 @@ class MultiheadState:
                 moves[offset + idx] = 1
         # build city actions (per unit slot)
         build_offset = offset + self.ECON_BUILD_CITY_OFFSET
-        for idx in range(self.max_units):
-            u = self.units[player][idx] if idx < len(self.units[player]) else None
-            if u is None or not u.alive or not u.can_build_city:
+        if len(self.cities[player]) < self.max_cities:
+            for idx in range(self.max_units):
+                u = self.units[player][idx] if idx < len(self.units[player]) else None
+                if u is None or not u.alive or not u.can_build_city:
+                    continue
+                if self._city_at(u.x, u.y, player) is not None:
+                    continue
+                moves[build_offset + idx] = 1
+        # production actions (per city slot)
+        prod_offset = offset + self.ECON_PRODUCTION_OFFSET
+        for city_idx in range(min(len(self.cities[player]), self.max_cities)):
+            if self._city_unit_count(player, city_idx) >= self.cfg.city_unit_cap:
                 continue
-            moves[build_offset + idx] = 1
+            for unit_idx, unit_name in enumerate(PRODUCTION_UNIT_NAMES):
+                if not self._unit_unlocked(player, unit_name):
+                    continue
+                moves[prod_offset + city_idx * self.PRODUCTION_UNIT_COUNT + unit_idx] = 1
         # pass always valid
         moves[self.PASS_ACTION] = 1
         return moves
@@ -225,22 +389,41 @@ class MultiheadState:
                 tech = self.RESEARCH_TECHS[econ_idx]
                 if not self.research_done[player].get(tech, False):
                     self.research_done[player][tech] = True
+                    reward = self.cfg.research_reward_map.get(
+                        tech, self.cfg.research_reward
+                    )
+                    self.scores[player] += reward
                 # small bonus hooks can be added later
             # build city (per unit slot)
-            elif self.ECON_BUILD_CITY_OFFSET <= econ_idx < self.ECON_PASS_OFFSET:
+            elif self.ECON_BUILD_CITY_OFFSET <= econ_idx < self.ECON_PRODUCTION_OFFSET:
                 unit_idx = econ_idx - self.ECON_BUILD_CITY_OFFSET
-                if unit_idx < len(self.units[player]):
+                if unit_idx < len(self.units[player]) and len(self.cities[player]) < self.max_cities:
                     u = self.units[player][unit_idx]
-                    if u.alive and u.can_build_city:
-                        # For now, treat building a city as consuming the settler unit.
+                    if u.alive and u.can_build_city and self._city_at(u.x, u.y, player) is None:
                         u.alive = False
+                        self._add_city(player, u.x, u.y)
+                        self.scores[player] += self.cfg.build_city_reward
+            # production selection
+            elif self.ECON_PRODUCTION_OFFSET <= econ_idx < self.ECON_PASS_OFFSET:
+                rel = econ_idx - self.ECON_PRODUCTION_OFFSET
+                city_slot = rel // self.PRODUCTION_UNIT_COUNT
+                unit_idx = rel % self.PRODUCTION_UNIT_COUNT
+                if city_slot < len(self.cities[player]):
+                    unit_name = PRODUCTION_UNIT_NAMES[unit_idx]
+                    if self._unit_unlocked(player, unit_name):
+                        city = self.cities[player][city_slot]
+                        if city.production_target != unit_name:
+                            city.production_target = unit_name
+                            city.production_progress = 0.0
         self._resolve_terminal()
         # Stay in the same turn unless we exceed the per-turn action cap.
         self.actions_this_turn += 1
         if self.actions_this_turn >= self.max_actions_per_turn:
             self._advance_turn()
 
-    def _handle_unit_action(self, player: Player, unit_idx: int, dir_idx: int, is_attack: bool) -> None:
+    def _handle_unit_action(
+        self, player: Player, unit_idx: int, dir_idx: int, is_attack: bool
+    ) -> None:
         if unit_idx >= len(self.units[player]):
             return
         u = self.units[player][unit_idx]
@@ -253,26 +436,30 @@ class MultiheadState:
         if is_attack:
             enemy = self._unit_at(nx, ny, -player)
             if enemy:
-                self._attack(u, enemy)
+                self._attack(player, u, enemy)
         else:
             # Move if no friendly blocking
             if self._unit_at(nx, ny, player) is None:
                 u.x, u.y = nx, ny
+                self.scores[player] += self.cfg.move_reward
 
-    def _attack(self, attacker: MHUnit, defender: MHUnit) -> None:
-        defender.hp -= attacker.atk
+    def _attack(self, player: Player, attacker: MHUnit, defender: MHUnit) -> None:
+        atk = max(1, attacker.atk)
+        df = max(1, defender.df)
+        p_hit = atk / float(atk + df)
+        while attacker.hp > 0 and defender.hp > 0:
+            if self.rng.random() < p_hit:
+                defender.hp -= max(1, attacker.firepower)
+            else:
+                attacker.hp -= max(1, defender.firepower)
+
         if defender.hp <= 0:
             defender.alive = False
-            # Credit the kill to the attacker side.
-            for side, lst in self.units.items():
-                if defender in lst:
-                    self.kills[1 if side == 1 else -1] += 0  # defender side; attacker credited below
-                    break
-            self.kills[1 if attacker in self.units[1] else -1] += 1
-        else:
-            attacker.hp -= max(1, defender.df)
-            if attacker.hp <= 0:
-                attacker.alive = False
+            self.kills[player] += 1
+            self.scores[player] += self.cfg.elimination_bonus
+            self.scores[-player] -= self.cfg.elimination_bonus
+        if attacker.hp <= 0:
+            attacker.alive = False
 
     def _unit_at(self, x: int, y: int, player: Player) -> Optional[MHUnit]:
         for u in self.units[player]:
@@ -280,9 +467,118 @@ class MultiheadState:
                 return u
         return None
 
+    def _city_at(self, x: int, y: int, player: Player) -> Optional[City]:
+        for city in self.cities[player]:
+            if city.x == x and city.y == y:
+                return city
+        return None
+
+    def _unit_unlocked(self, player: Player, unit_name: str) -> bool:
+        tech = UNIT_TECH.get(unit_name)
+        if tech is None:
+            return True
+        return self.research_done[player].get(tech, False)
+
+    def _city_unit_count(self, player: Player, city_idx: int) -> int:
+        return sum(
+            1
+            for u in self.units[player]
+            if u.alive and u.home_city == city_idx
+        )
+
+    def _add_city(self, player: Player, x: int, y: int) -> None:
+        if len(self.cities[player]) >= self.max_cities:
+            return
+        self.cities[player].append(City(x=x, y=y))
+
+    def _place_unit(
+        self, player: Player, unit: MHUnit, city_idx: Optional[int]
+    ) -> bool:
+        for slot in self.units[player]:
+            if not slot.alive:
+                slot.x = unit.x
+                slot.y = unit.y
+                slot.hp = unit.hp
+                slot.atk = unit.atk
+                slot.df = unit.df
+                slot.firepower = unit.firepower
+                slot.unit_type = unit.unit_type
+                slot.alive = True
+                slot.can_build_city = unit.can_build_city
+                slot.home_city = city_idx
+                return True
+        if len(self.units[player]) < self.max_units:
+            unit.home_city = city_idx
+            self.units[player].append(unit)
+            return True
+        return False
+
+    def _spawn_from_city(self, player: Player, city_idx: int, unit_name: str) -> bool:
+        if city_idx >= len(self.cities[player]):
+            return False
+        if self._city_unit_count(player, city_idx) >= self.cfg.city_unit_cap:
+            return False
+        spec = UNIT_SPECS.get(unit_name)
+        if spec is None:
+            return False
+        city = self.cities[player][city_idx]
+        candidates = [(city.x, city.y)] + [
+            (nx, ny)
+            for nx, ny in self.movement.get_native_neighbors(city.x, city.y)
+            if nx is not None and ny is not None
+        ]
+        for cx, cy in candidates:
+            if (
+                self._unit_at(cx, cy, player) is None
+                and self.gt
+                and 0 <= cy < self.cfg.map_h
+                and 0 <= cx < self.cfg.map_w
+                and self.gt.au_map[cy, cx] == 'A'
+            ):
+                unit = MHUnit(
+                    cx,
+                    cy,
+                    spec.hp,
+                    spec.atk,
+                    spec.df,
+                    spec.firepower,
+                    spec.name,
+                    True,
+                    spec.can_build_city,
+                    city_idx,
+                )
+                return self._place_unit(player, unit, city_idx)
+        return False
+
+    def _apply_city_economy(self) -> None:
+        for player in (1, -1):
+            for city_idx, city in enumerate(self.cities[player]):
+                size = max(1, city.size)
+                total_food = self.cfg.city_food + self.cfg.grass_food * size
+                total_shields = self.cfg.city_shield + self.cfg.grass_shield * size
+                total_trade = self.cfg.city_trade + self.cfg.grass_trade * size
+
+                food_surplus = total_food - self.cfg.food_consumption * size
+                if food_surplus > 0:
+                    city.food_storage += food_surplus
+                    if city.food_storage >= self.cfg.food_growth:
+                        city.food_storage -= self.cfg.food_growth
+                        city.size += 1
+                else:
+                    city.food_storage = max(0.0, city.food_storage + food_surplus)
+
+                city.production_progress += total_shields
+                if city.production_target:
+                    spec = UNIT_SPECS.get(city.production_target)
+                    if spec and city.production_progress >= spec.cost:
+                        if self._spawn_from_city(player, city_idx, city.production_target):
+                            city.production_progress -= spec.cost
+
+                # Research via trade is not modeled yet; research is action-based.
+
     def _resolve_terminal(self) -> None:
-        alive_me = any(u.alive for u in self.units[1])
-        alive_opp = any(u.alive for u in self.units[-1])
+        alive_me = any(u.alive for u in self.units[1]) or bool(self.cities[1])
+        alive_opp = any(u.alive for u in self.units[-1]) or bool(self.cities[-1])
         if alive_me and not alive_opp:
             self.winner = 1
             self.terminal_reason = "eliminate_opp"
@@ -294,6 +590,7 @@ class MultiheadState:
             self.terminal_reason = "mutual_destruction"
 
     def _advance_turn(self) -> None:
+        self._apply_city_economy()
         self.turn += 1
         self.actions_this_turn = 0
         if self.turn >= self.cfg.max_turns and self.winner is None:
@@ -324,6 +621,9 @@ class MultiheadState:
         hd = self._hp_sum(player) - self._hp_sum(opp)
         if hd != 0:
             return 1 if hd > 0 else -1
+        cd = len(self.cities[player]) - len(self.cities[opp])
+        if cd != 0:
+            return 1 if cd > 0 else -1
         return 0
 
     # ---------- encodings ----------
@@ -338,6 +638,10 @@ class MultiheadState:
         unit_opp = np.zeros_like(channels[0])
         hp_me = np.zeros_like(channels[0])
         hp_opp = np.zeros_like(channels[0])
+        city_me = np.zeros_like(channels[0])
+        city_opp = np.zeros_like(channels[0])
+        city_size_me = np.zeros_like(channels[0])
+        city_size_opp = np.zeros_like(channels[0])
         for u in self.units[me]:
             if not u.alive:
                 continue
@@ -348,10 +652,24 @@ class MultiheadState:
                 continue
             unit_opp[u.y, u.x] = 1.0
             hp_opp[u.y, u.x] = u.hp / 20.0
+        for c in self.cities[me]:
+            city_me[c.y, c.x] = 1.0
+            city_size_me[c.y, c.x] = min(
+                1.0, float(c.size) / max(1.0, self.cfg.city_size_norm)
+            )
+        for c in self.cities[opp]:
+            city_opp[c.y, c.x] = 1.0
+            city_size_opp[c.y, c.x] = min(
+                1.0, float(c.size) / max(1.0, self.cfg.city_size_norm)
+            )
         channels.append(unit_me)
         channels.append(unit_opp)
         channels.append(hp_me)
         channels.append(hp_opp)
+        channels.append(city_me)
+        channels.append(city_opp)
+        channels.append(city_size_me)
+        channels.append(city_size_opp)
         # research planes
         for tech in self.RESEARCH_TECHS:
             tme = np.full_like(unit_me, 1.0 if self.research_done[me].get(tech, False) else 0.0)
@@ -369,6 +687,8 @@ class MultiheadState:
             for idx, u in enumerate(self.units[p]):
                 if u.alive:
                     parts.append(f"p{p}u{idx}:{u.x},{u.y},hp{u.hp}")
+            for cidx, city in enumerate(self.cities[p]):
+                parts.append(f"c{p}{cidx}:{city.x},{city.y},sz{city.size}")
             # Include research status to disambiguate states with identical unit positions.
             res_bits = ''.join('1' if self.research_done[p].get(tech, False) else '0' for tech in self.RESEARCH_TECHS)
             parts.append(f"r{p}:{res_bits}")

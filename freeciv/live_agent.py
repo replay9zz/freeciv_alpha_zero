@@ -238,6 +238,13 @@ def pick_production_target(research_flags: Dict[str, bool], unit_values: Dict[st
     Choose the highest-value unlocked unit given known techs.
     Falls back to Warriors if nothing else is unlocked.
     """
+    # Simple aggression tweak: if Archers are unlocked, prefer them over Warriors to
+    # get more ranged attackers for city sieges.
+    if research_flags.get("Warrior Code", False) and "Archers" in unit_values:
+        arch_req, _arch_val = unit_values["Archers"]
+        if not arch_req or research_flags.get(arch_req, False):
+            return "Archers"
+
     best_name = "Warriors"
     best_val = -1.0
     for name, (req_tech, val) in unit_values.items():
@@ -256,16 +263,32 @@ def queue_city_production(
     city_id: int,
     research_flags: Dict[str, bool],
     unit_values: Optional[Dict[str, Tuple[str, float]]] = None,
+    controlled_units: Optional[List[int]] = None,
+    unit_type_labels: Optional[Dict[int, str]] = None,
 ) -> bool:
     """
     Set production to the best unlocked unit (prefers stronger tech-gated units).
     """
-    if not unit_values:
-        target_name = pick_production_target(research_flags, {})
-        print(f"[production] unit values unavailable; defaulting to {target_name}")
+    # Prefer getting at least a small archer force on the board early (ranged city pressure/defense).
+    desired_archers = 4
+    archer_count = 0
+    if controlled_units and unit_type_labels:
+        for uid in controlled_units:
+            if "archer" in (unit_type_labels.get(uid, "") or "").lower():
+                archer_count += 1
+
+    if unit_values and "Archers" in unit_values:
+        req, _val = unit_values["Archers"]
+        archers_unlocked = not req or research_flags.get(req, False)
+        if archers_unlocked and archer_count < desired_archers:
+            target_name = "Archers"
+            print(f"[production] archer count={archer_count}/{desired_archers}; forcing Archers")
+        else:
+            target_name = pick_production_target(research_flags, unit_values)
+            print(f"[production] choose {target_name} (unlocked={research_flags.get(unit_values.get(target_name, ('',0))[0], True)})")
     else:
-        target_name = pick_production_target(research_flags, unit_values)
-        print(f"[production] choose {target_name} (unlocked={research_flags.get(unit_values.get(target_name, ('',0))[0], True)})")
+        target_name = pick_production_target(research_flags, unit_values or {})
+        print(f"[production] unit values unavailable; defaulting to {target_name}")
     return client.set_city_production(city_id, "UnitType", target_name)
 
 def query_player_research(client: LuaRemoteClient, player_id: int) -> str:
@@ -394,12 +417,14 @@ def build_multihead_state(
     state.movement = FreecivMovement(cfg.map_w, cfg.map_h)
     state.gt = GroundTruth(snapshot.au_map.copy(), snapshot.enemy_map.copy())
     state.units = {1: [], -1: []}
+    state.cities = {1: [], -1: []}
     state.research_done = {1: {}, -1: {}}
     state.turn = 0
     state.actions_this_turn = 0
     state.max_actions_per_turn = max(1, max_units * 2)
     state.winner = None
     state.terminal_reason = None
+    state.scores = {1: 0.0, -1: 0.0}
 
     state.RESEARCH_TECHS = MultiheadState.RESEARCH_TECHS
     state.MOVE_PER_UNIT = MultiheadState.MOVE_PER_UNIT
@@ -407,16 +432,24 @@ def build_multihead_state(
 
     # Friendly unit slots.
     for (x, y), can_build in zip(unit_positions[:max_units], unit_can_build_city[:max_units]):
-        state.units[1].append(MHUnit(int(x), int(y), 10, 2, 1, True, bool(can_build)))
+        state.units[1].append(
+            MHUnit(int(x), int(y), 10, 2, 1, 1, "Settlers", True, bool(can_build), None)
+        )
     while len(state.units[1]) < max_units:
-        state.units[1].append(MHUnit(0, 0, 0, 0, 0, False, False))
+        state.units[1].append(
+            MHUnit(0, 0, 0, 0, 0, 1, "None", False, False, None)
+        )
 
     # Enemy unit slots (approximate from known enemy tiles).
     enemy_coords = [(int(x), int(y)) for (y, x) in np.argwhere(snapshot.enemy_map)]
     for x, y in enemy_coords[:max_units]:
-        state.units[-1].append(MHUnit(int(x), int(y), 10, 2, 1, True, False))
+        state.units[-1].append(
+            MHUnit(int(x), int(y), 10, 2, 1, 1, "Warriors", True, False, None)
+        )
     while len(state.units[-1]) < max_units:
-        state.units[-1].append(MHUnit(0, 0, 0, 0, 0, False, False))
+        state.units[-1].append(
+            MHUnit(0, 0, 0, 0, 0, 1, "None", False, False, None)
+        )
 
     state.research_done = {
         1: {tech: snapshot.research_flags.get(tech, False) for tech in state.RESEARCH_TECHS},
@@ -427,8 +460,13 @@ def build_multihead_state(
     state.ATTACK_SIZE = max_units * state.ATTACK_PER_UNIT
     state.ECON_RESEARCH_OFFSET = 0
     state.ECON_BUILD_CITY_OFFSET = len(state.RESEARCH_TECHS)
-    state.ECON_PASS_OFFSET = len(state.RESEARCH_TECHS) + max_units
-    state.ECON_SIZE = len(state.RESEARCH_TECHS) + max_units + 1
+    state.max_cities = 1
+    state.ECON_PRODUCTION_OFFSET = state.ECON_BUILD_CITY_OFFSET + max_units
+    state.PRODUCTION_UNIT_COUNT = len(MultiheadState.PRODUCTION_UNIT_NAMES)
+    state.ECON_PASS_OFFSET = (
+        state.ECON_PRODUCTION_OFFSET + state.max_cities * state.PRODUCTION_UNIT_COUNT
+    )
+    state.ECON_SIZE = state.ECON_PASS_OFFSET + 1
     state.ACTION_SIZE = state.MOVE_SIZE + state.ATTACK_SIZE + state.ECON_SIZE
     state.PASS_ACTION = state.ACTION_SIZE - 1
     return state
@@ -681,15 +719,21 @@ def run_multihead_agent(
                 for cid, _cx, _cy in owned_cities:
                     if cid in queued_city_production:
                         continue
-                    queued = queue_city_production(client, cid, research_flags={}, unit_values=unit_values)
+                    queued = queue_city_production(
+                        client,
+                        cid,
+                        research_flags={},
+                        unit_values=unit_values,
+                        controlled_units=controlled_units,
+                        unit_type_labels=unit_type_labels,
+                    )
                     print(f"[production] city={cid} queued={queued}")
                     if queued:
                         queued_city_production.add(cid)
-                client.end_turn()
-                turns += 1
-                time.sleep(args.sleep)
-                continue
-            break
+            client.end_turn()
+            turns += 1
+            time.sleep(args.sleep)
+            continue
 
         # Update knowledge using the first unit as vision anchor.
         try:
@@ -721,7 +765,14 @@ def run_multihead_agent(
         for cid, _cx, _cy in owned_cities:
             if cid in queued_city_production:
                 continue
-            queued = queue_city_production(client, cid, research_flags=snapshot.research_flags, unit_values=unit_values)
+            queued = queue_city_production(
+                client,
+                cid,
+                research_flags=snapshot.research_flags,
+                unit_values=unit_values,
+                controlled_units=controlled_units,
+                unit_type_labels=unit_type_labels,
+            )
             print(f"[production] city={cid} queued={queued}")
             if queued:
                 queued_city_production.add(cid)
@@ -735,6 +786,66 @@ def run_multihead_agent(
                 continue
             unit_positions.append((pos_info[0], pos_info[1]))
 
+        # If an owned city is threatened (enemy within 2 tiles) and not garrisoned,
+        # pull units back to that city for defense.
+        city_coords = [(cx, cy) for (_cid, cx, cy) in owned_cities]
+        enemy_coords = [(int(x), int(y)) for (y, x) in np.argwhere(snapshot.enemy_map)]
+        threatened_city: Optional[Tuple[int, int]] = None
+        garrisoned: Set[Tuple[int, int]] = set(unit_positions)
+        for cx, cy in city_coords:
+            has_enemy_near = any(abs(cx - ex) + abs(cy - ey) <= 2 for ex, ey in enemy_coords)
+            if has_enemy_near and (cx, cy) not in garrisoned:
+                threatened_city = (cx, cy)
+                break
+        # If any unit is already adjacent to an enemy (unit/city), force an attack before policy.
+        for unit_idx, (ux, uy) in enumerate(unit_positions):
+            neighbors = movement.get_native_neighbors(int(ux), int(uy))
+            for dir_idx, (nx, ny) in enumerate(neighbors):
+                if nx is None or ny is None:
+                    continue
+                status = snapshot.status_lookup.get((nx, ny))
+                if not status:
+                    continue
+                _au_char, enemy_flag, enemy_units, friendly_units, *_rest = status
+                if (enemy_flag or enemy_units or snapshot.enemy_map[ny, nx]) and not friendly_units:
+                    unit_id = controlled_units[unit_idx]
+                    success = client.attack_target(unit_id, int(nx), int(ny))
+                    print(
+                        f"[turn {turns}] forced attack unit={format_unit_label(unit_id, unit_type_labels)} "
+                        f"target=({nx},{ny}) dir_idx={dir_idx} success={success}"
+                    )
+                    steps += 1
+                    # Refresh snapshot/positions after the attack.
+                    try:
+                        snapshot, player_id = gather_snapshot(
+                            client=client,
+                            movement=movement,
+                            cfg=map_cfg,
+                            unit_id=controlled_units[0],
+                            player_id=player_id,
+                            known_tiles=known_tiles,
+                            known_enemy=known_enemy,
+                            visited_tiles=visited_tiles,
+                        )
+                    except RuntimeError:
+                        controlled_units, player_id = discover_controlled_units(client, player_id)
+                        controlled_units = sorted(controlled_units)
+                        unit_positions = []
+                        break
+                    visited_tiles.add(snapshot.player_pos)
+                    unit_positions = []
+                    for uid in controlled_units:
+                        pos_result = client.eval(simple_find_unit_pos(uid))
+                        pos_info = parse_position_result(pos_result)
+                        if pos_info is None:
+                            continue
+                        unit_positions.append((pos_info[0], pos_info[1]))
+                    enemy_coords = [(int(x), int(y)) for (y, x) in np.argwhere(snapshot.enemy_map)]
+                    break
+            else:
+                continue
+            break
+
         current_research: Optional[str] = None
         if isinstance(snapshot.research_name, str) and snapshot.research_name.startswith("__TECH__"):
             current_research = snapshot.research_name.replace("__TECH__", "", 1).strip() or None
@@ -746,6 +857,27 @@ def run_multihead_agent(
             unit_can_build_city = [
                 ("settler" in (unit_type_labels.get(uid, "") or "").lower()) for uid in controlled_units
             ]
+            # Identify a target to focus movement/attacks: first known enemy tile (unit or city).
+            target_coord: Optional[Tuple[int, int]] = None
+            # Prefer explicit enemy tiles from vision status (covers cities even if enemy_map missed it).
+            for (nx, ny), status in snapshot.status_lookup.items():
+                if not status:
+                    continue
+                _au_char, enemy_flag, enemy_units, _friendly_units, *_rest = status
+                if enemy_flag or enemy_units:
+                    target_coord = (int(nx), int(ny))
+                    break
+            # Fallback to enemy_map if nothing in status_lookup.
+            if target_coord is None:
+                coords = np.argwhere(snapshot.enemy_map)
+                if coords.size > 0:
+                    # enemy_map uses (y, x); convert to (x, y)
+                    y0, x0 = coords[0]
+                    target_coord = (int(x0), int(y0))
+            # If a city is threatened, override with defense target.
+            if threatened_city is not None:
+                target_coord = threatened_city
+
             board_state = build_multihead_state(
                 map_cfg,
                 snapshot,
@@ -800,6 +932,36 @@ def run_multihead_agent(
                     aidx = econ_offset + idx
                     if 0 <= aidx < len(pi):
                         pi[aidx] *= w
+
+            # If a target is known, bias moves/attacks toward it to reduce circling/retreating.
+            if target_coord is not None:
+                tx, ty = target_coord
+                for unit_idx, (ux, uy) in enumerate(unit_positions):
+                    # If sitting on the threatened city with no adjacent enemy, hold position (defend).
+                    if target_coord == threatened_city and (ux, uy) == target_coord:
+                        move_start = unit_idx * board_state.MOVE_PER_UNIT
+                        move_end = move_start + board_state.MOVE_PER_UNIT
+                        pi[move_start:move_end] *= 0.0
+                        continue
+                    neighbors = movement.get_native_neighbors(int(ux), int(uy))
+                    best_dir = None
+                    best_dist = float("inf")
+                    for dir_idx, (nx, ny) in enumerate(neighbors):
+                        if nx is None or ny is None:
+                            continue
+                        dist = abs(tx - nx) + abs(ty - ny)
+                        if dist < best_dist:
+                            best_dist = dist
+                            best_dir = dir_idx
+                    if best_dir is not None:
+                        move_idx = unit_idx * board_state.MOVE_PER_UNIT + best_dir
+                        if 0 <= move_idx < len(pi):
+                            pi[move_idx] *= 3.0
+                        # If adjacent, also boost the corresponding attack action.
+                        if best_dist == 0:
+                            atk_idx = board_state.MOVE_SIZE + unit_idx * board_state.ATTACK_PER_UNIT + best_dir
+                            if 0 <= atk_idx < len(pi):
+                                pi[atk_idx] *= 5.0
 
             def choose_with_priority() -> int:
                 # Option A (turn-aware):
@@ -990,7 +1152,7 @@ def main() -> None:
     # [N, NE, SE, S, SW, NW] -> [0, 1, 4, 7, 6, 3]
     ap.add_argument('--dir-ids', default='0,1,4,7,6,3')
     ap.add_argument('--sleep', type=float, default=0.1)
-    ap.add_argument('--max-steps', type=int, default=200)
+    ap.add_argument('--max-steps', type=int, default=800)
     ap.add_argument(
         '--tech-weight',
         action='append',
@@ -1178,7 +1340,14 @@ def main() -> None:
                 for cid, _cx, _cy in owned_cities:
                     if cid in queued_city_production:
                         continue
-                    queued = queue_city_production(client, cid, snapshot.research_flags, unit_values)
+                    queued = queue_city_production(
+                        client,
+                        cid,
+                        snapshot.research_flags,
+                        unit_values,
+                        controlled_units=controlled_units,
+                        unit_type_labels=unit_type_labels,
+                    )
                     print(f"[step {steps}] queued production in city {cid} success={queued}")
                     if queued:
                         queued_city_production.add(cid)
@@ -1335,13 +1504,20 @@ def main() -> None:
                     previous_pos.pop(uid, None)
         owned_cities = discover_player_cities(client, player_id)
         if owned_cities:
-            for cid, _cx, _cy in owned_cities:
-                if cid in queued_city_production:
-                    continue
-                queued = queue_city_production(client, cid, research_flags=last_research_flags, unit_values=unit_values)
-                print(f"[turn {turns}] queued production in city {cid} success={queued}")
-                if queued:
-                    queued_city_production.add(cid)
+                for cid, _cx, _cy in owned_cities:
+                    if cid in queued_city_production:
+                        continue
+                    queued = queue_city_production(
+                        client,
+                        cid,
+                        research_flags=last_research_flags,
+                        unit_values=unit_values,
+                        controlled_units=controlled_units,
+                        unit_type_labels=unit_type_labels,
+                    )
+                    print(f"[turn {turns}] queued production in city {cid} success={queued}")
+                    if queued:
+                        queued_city_production.add(cid)
 
     if not controlled_units:
         print(f"No active units remain after {steps} steps ({turns} turns); exiting.")

@@ -34,18 +34,35 @@ class MultiheadGame(Game):
     Multi-unit move/attack + research environment for multi-head training.
     """
 
-    def __init__(self, cfg: MapConfig | None = None, provider: BaseProvider | None = None, max_units: int = 4):
+    def __init__(
+        self,
+        cfg: MapConfig | None = None,
+        provider: BaseProvider | None = None,
+        max_units: int = 6,
+        max_cities: int = 3,
+    ):
         self.cfg = cfg or MapConfig()
         self.provider = provider or RandomMapProvider(self.cfg.map_w, self.cfg.map_h)
         self.max_units = max_units
+        self.max_cities = max_cities
         # Precompute action size to avoid repeated state construction in MCTS.
-        tmp_state = MultiheadState(self.cfg, self.provider, max_units=self.max_units)
+        tmp_state = MultiheadState(
+            self.cfg,
+            self.provider,
+            max_units=self.max_units,
+            max_cities=self.max_cities,
+        )
         self._action_size = tmp_state.ACTION_SIZE
         # Expose head sizes for multi-head policy networks.
         self.policy_head_sizes = (tmp_state.MOVE_SIZE, tmp_state.ATTACK_SIZE, tmp_state.ECON_SIZE)
 
     def getInitBoard(self) -> MultiheadState:
-        return MultiheadState(self.cfg, self.provider, max_units=self.max_units)
+        return MultiheadState(
+            self.cfg,
+            self.provider,
+            max_units=self.max_units,
+            max_cities=self.max_cities,
+        )
 
     def getBoardSize(self) -> Tuple[int, int, int]:
         state = self.getInitBoard()

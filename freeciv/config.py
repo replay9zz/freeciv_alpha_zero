@@ -16,13 +16,24 @@ class MapConfig:
     visit_reward: float = 0.25
     backtrack_penalty: float = -0.08
     wall_penalty: float = -0.15
-    elimination_bonus: float = 1.5
-    draw_value: float = 1e-4
+    elimination_bonus: float = 3.0
+    draw_value: float = -0.05
     build_city_reward: float = 0.15
     research_reward: float = 0.02
     # Optional per-tech rewards; falls back to research_reward when missing.
     research_reward_map: Dict[str, float] = field(default_factory=dict)
     move_reward: float = 0.02
+    # City economy (minimal ruleset approximation)
+    city_food: int = 2
+    city_shield: int = 1
+    city_trade: int = 2
+    grass_food: int = 2
+    grass_shield: int = 1
+    grass_trade: int = 1
+    food_consumption: int = 2
+    food_growth: int = 20
+    city_unit_cap: int = 6
+    city_size_norm: int = 10
 
 
 @dataclass
