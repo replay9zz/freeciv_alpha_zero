@@ -34,6 +34,7 @@ class MapConfig:
     food_growth: int = 20
     city_unit_cap: int = 6
     city_size_norm: int = 10
+    city_capture_reward: float = 5.0
 
 
 @dataclass

@@ -349,7 +349,10 @@ class MultiheadState:
                     if self._unit_at(nx, ny, player) is None:
                         moves[move_base + dir_idx] = 1
                     # attack only if an enemy occupies the target
-                    if self._unit_at(nx, ny, -player) is not None:
+                    if u.atk > 0 and (
+                        self._unit_at(nx, ny, -player) is not None
+                        or self._city_at(nx, ny, -player) is not None
+                    ):
                         moves[atk_base + dir_idx] = 1
         # research actions (one-time per tech)
         offset = self.MOVE_SIZE + self.ATTACK_SIZE
@@ -447,9 +450,22 @@ class MultiheadState:
         if nx is None or ny is None or not self.gt or self.gt.au_map[ny, nx] != 'A':
             return
         if is_attack:
+            if u.atk <= 0:
+                return
             enemy = self._unit_at(nx, ny, -player)
             if enemy:
                 self._attack(player, u, enemy)
+                if enemy.alive:
+                    return
+                if not u.alive:
+                    return
+                city_idx = self._city_at_index(nx, ny, -player)
+                if city_idx is not None:
+                    self._attack_city(player, u, -player, city_idx)
+            else:
+                city_idx = self._city_at_index(nx, ny, -player)
+                if city_idx is not None:
+                    self._attack_city(player, u, -player, city_idx)
         else:
             # Move if no friendly blocking
             if self._unit_at(nx, ny, player) is None:
@@ -459,6 +475,8 @@ class MultiheadState:
                     self.scores[player] += self.cfg.move_reward
 
     def _attack(self, player: Player, attacker: MHUnit, defender: MHUnit) -> None:
+        if attacker.atk <= 0:
+            return
         atk = max(1, attacker.atk)
         df = max(1, defender.df)
         p_hit = atk / float(atk + df)
@@ -476,6 +494,24 @@ class MultiheadState:
         if attacker.hp <= 0:
             attacker.alive = False
 
+    def _attack_city(
+        self,
+        player: Player,
+        attacker: MHUnit,
+        defender: Player,
+        city_idx: int,
+    ) -> None:
+        if attacker.atk <= 0:
+            return
+        if city_idx < 0 or city_idx >= len(self.cities[defender]):
+            return
+        city = self.cities[defender][city_idx]
+        if self._unit_at(city.x, city.y, defender) is not None:
+            return
+        self._remove_city(defender, city_idx)
+        self.scores[player] += self.cfg.city_capture_reward
+        self.scores[-player] -= self.cfg.city_capture_reward
+
     def _unit_at(self, x: int, y: int, player: Player) -> Optional[MHUnit]:
         for u in self.units[player]:
             if u.alive and u.x == x and u.y == y:
@@ -486,6 +522,12 @@ class MultiheadState:
         for city in self.cities[player]:
             if city.x == x and city.y == y:
                 return city
+        return None
+
+    def _city_at_index(self, x: int, y: int, player: Player) -> Optional[int]:
+        for idx, city in enumerate(self.cities[player]):
+            if city.x == x and city.y == y:
+                return idx
         return None
 
     def _unit_unlocked(self, player: Player, unit_name: str) -> bool:
@@ -505,6 +547,18 @@ class MultiheadState:
         if len(self.cities[player]) >= self.max_cities:
             return
         self.cities[player].append(City(x=x, y=y))
+
+    def _remove_city(self, player: Player, city_idx: int) -> None:
+        if city_idx < 0 or city_idx >= len(self.cities[player]):
+            return
+        del self.cities[player][city_idx]
+        for u in self.units[player]:
+            if not u.alive or u.home_city is None:
+                continue
+            if u.home_city == city_idx:
+                u.home_city = None
+            elif u.home_city > city_idx:
+                u.home_city -= 1
 
     def _place_unit(
         self, player: Player, unit: MHUnit, city_idx: Optional[int]
