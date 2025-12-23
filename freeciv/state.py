@@ -9,7 +9,7 @@ from freeciv_rl.freeciv_movement import FreecivMovement
 
 from .config import MapConfig
 from .providers import BaseProvider, GroundTruth
-from .research_policy import RESEARCH_TECHS, TARGET_TECH_NAME
+from .research_policy import RESEARCH_TECHS, TARGET_TECH_NAME, TECH_PREREQS
 
 Player = int  # 1 or -1
 Coord = Tuple[int, int]
@@ -175,6 +175,9 @@ class FreecivBoardState:
         if has_city:
             for idx, tech in enumerate(self.RESEARCH_TECHS):
                 if self.research_done[player].get(tech, False):
+                    continue
+                prereqs = TECH_PREREQS.get(tech, [])
+                if any(not self.research_done[player].get(req, False) for req in prereqs):
                     continue
                 moves[self.RESEARCH_ACTION_BASE + idx] = 1
 

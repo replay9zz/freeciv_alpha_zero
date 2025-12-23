@@ -299,11 +299,29 @@ def query_player_research(client: LuaRemoteClient, player_id: int) -> str:
     lua = (
         "return (function() "
         f"local pl = find.player and find.player({player_id}); "
-        "if not pl or not pl.researching then return '__NORESEARCH__' end; "
-        "local ok, tech = pcall(function() return pl:researching() end); "
-        "if not ok or not tech then return '__NORESEARCH__' end; "
-        "local ok2, name = pcall(function() return tech:rule_name() end); "
-        "if ok2 and name and name ~= '' then return '__TECH__ '..name end; "
+        "if not pl then return '__NORESEARCH__' end; "
+        "local tech=nil; "
+        "local ok,res=pcall(function() "
+        "  if pl.researching ~= nil then "
+        "    if type(pl.researching)=='function' then return pl:researching() end "
+        "    return pl.researching "
+        "  end "
+        "  return nil "
+        "end); "
+        "if ok and res then tech=res end; "
+        "if not tech then "
+        "  local ok2,res2=pcall(function() "
+        "    if pl.research_goal ~= nil then "
+        "      if type(pl.research_goal)=='function' then return pl:research_goal() end "
+        "      return pl.research_goal "
+        "    end "
+        "    return nil "
+        "  end); "
+        "  if ok2 and res2 then tech=res2 end; "
+        "end; "
+        "if not tech then return '__NORESEARCH__' end; "
+        "local ok3, name = pcall(function() return tech:rule_name() end); "
+        "if ok3 and name and name ~= '' then return '__TECH__ '..name end; "
         "return '__NORESEARCH__' "
         "end)()"
     )
@@ -425,6 +443,7 @@ def build_multihead_state(
     state.winner = None
     state.terminal_reason = None
     state.scores = {1: 0.0, -1: 0.0}
+    state.acted_unit_slots = {1: set(), -1: set()}
 
     state.RESEARCH_TECHS = MultiheadState.RESEARCH_TECHS
     state.MOVE_PER_UNIT = MultiheadState.MOVE_PER_UNIT

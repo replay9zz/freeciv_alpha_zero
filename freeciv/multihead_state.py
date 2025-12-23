@@ -10,7 +10,7 @@ from freeciv_rl.freeciv_movement import FreecivMovement
 
 from .config import MapConfig
 from .providers import BaseProvider, GroundTruth
-from .research_policy import RESEARCH_TECHS, TARGET_TECH_NAME
+from .research_policy import RESEARCH_TECHS, TARGET_TECH_NAME, TECH_PREREQS
 from .train import load_tech_unlocks
 
 Player = int  # 1 or -1
@@ -122,6 +122,9 @@ class MultiheadState:
     turn: int = 0
     actions_this_turn: int = 0
     max_actions_per_turn: int = 0
+    acted_unit_slots: Dict[Player, set[int]] = field(
+        default_factory=lambda: {1: set(), -1: set()}
+    )
     kills: Dict[Player, int] = field(default_factory=lambda: {1: 0, -1: 0})
     scores: Dict[Player, float] = field(default_factory=lambda: {1: 0.0, -1: 0.0})
     winner: Optional[Player] = None
@@ -178,6 +181,7 @@ class MultiheadState:
         }
         self.kills = {1: 0, -1: 0}
         self.scores = {1: 0.0, -1: 0.0}
+        self.acted_unit_slots = {1: set(), -1: set()}
         self._spawn_units()
 
     def _spawn_units(self) -> None:
@@ -309,6 +313,10 @@ class MultiheadState:
         new.turn = self.turn
         new.actions_this_turn = self.actions_this_turn
         new.max_actions_per_turn = self.max_actions_per_turn
+        new.acted_unit_slots = {
+            1: set(self.acted_unit_slots.get(1, set())),
+            -1: set(self.acted_unit_slots.get(-1, set())),
+        }
         new.kills = dict(self.kills)
         new.scores = dict(self.scores)
         new.winner = self.winner
@@ -334,11 +342,12 @@ class MultiheadState:
             moves[self.PASS_ACTION] = 1
             return moves
         # move head
+        acted_slots = self.acted_unit_slots.get(player, set())
         for idx in range(self.max_units):
             move_base = idx * self.MOVE_PER_UNIT
             atk_base = self.MOVE_SIZE + idx * self.ATTACK_PER_UNIT
             u = self.units[player][idx] if idx < len(self.units[player]) else None
-            if u is None or not u.alive:
+            if u is None or not u.alive or idx in acted_slots:
                 continue
             neighbors = self.movement.get_native_neighbors(u.x, u.y)
             for dir_idx, (nx, ny) in enumerate(neighbors):
@@ -357,14 +366,18 @@ class MultiheadState:
         # research actions (one-time per tech)
         offset = self.MOVE_SIZE + self.ATTACK_SIZE
         for idx, tech in enumerate(self.RESEARCH_TECHS):
-            if not self.research_done[player].get(tech, False):
-                moves[offset + idx] = 1
+            if self.research_done[player].get(tech, False):
+                continue
+            prereqs = TECH_PREREQS.get(tech, [])
+            if any(not self.research_done[player].get(req, False) for req in prereqs):
+                continue
+            moves[offset + idx] = 1
         # build city actions (per unit slot)
         build_offset = offset + self.ECON_BUILD_CITY_OFFSET
         if len(self.cities[player]) < self.max_cities:
             for idx in range(self.max_units):
                 u = self.units[player][idx] if idx < len(self.units[player]) else None
-                if u is None or not u.alive or not u.can_build_city:
+                if u is None or not u.alive or not u.can_build_city or idx in acted_slots:
                     continue
                 if self._city_at(u.x, u.y, player) is not None:
                     continue
@@ -393,11 +406,13 @@ class MultiheadState:
             unit_idx = action // self.MOVE_PER_UNIT
             dir_idx = action % self.MOVE_PER_UNIT
             self._handle_unit_action(player, unit_idx, dir_idx, is_attack=False)
+            self.acted_unit_slots.setdefault(player, set()).add(unit_idx)
         elif action < self.MOVE_SIZE + self.ATTACK_SIZE:
             rel = action - self.MOVE_SIZE
             unit_idx = rel // self.ATTACK_PER_UNIT
             dir_idx = rel % self.ATTACK_PER_UNIT
             self._handle_unit_action(player, unit_idx, dir_idx, is_attack=True)
+            self.acted_unit_slots.setdefault(player, set()).add(unit_idx)
         else:
             econ_idx = action - (self.MOVE_SIZE + self.ATTACK_SIZE)
             # research
@@ -419,6 +434,7 @@ class MultiheadState:
                         u.alive = False
                         self._add_city(player, u.x, u.y)
                         self.scores[player] += self.cfg.build_city_reward
+                        self.acted_unit_slots.setdefault(player, set()).add(unit_idx)
             # production selection
             elif self.ECON_PRODUCTION_OFFSET <= econ_idx < self.ECON_PASS_OFFSET:
                 rel = econ_idx - self.ECON_PRODUCTION_OFFSET
@@ -662,6 +678,7 @@ class MultiheadState:
         self._apply_city_economy()
         self.turn += 1
         self.actions_this_turn = 0
+        self.acted_unit_slots = {1: set(), -1: set()}
         if self.turn >= self.cfg.max_turns and self.winner is None:
             self.winner = 0
             self.terminal_reason = "max_turns"
