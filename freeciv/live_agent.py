@@ -15,6 +15,7 @@ try:
     from freeciv_rl.lua_helper import (  # type: ignore
         list_all_units,
         list_all_cities,
+        list_city_walls,
         list_all_unit_types,
         get_player_research,
         player_knows_tech,
@@ -37,6 +38,7 @@ except Exception:
         from freeciv_rl.lua_helper import (  # type: ignore
             list_all_units,
             list_all_cities,
+            list_city_walls,
             list_all_unit_types,
             get_player_research,
             player_knows_tech,

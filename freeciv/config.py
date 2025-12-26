@@ -20,6 +20,9 @@ class MapConfig:
     draw_value: float = -0.05
     build_city_reward: float = 0.5
     research_reward: float = 0.05
+    attack_reward: float = 0.0
+    # Defense multiplier applied when a unit was moved in the previous turn.
+    move_fatigue_defense_multiplier: float = 1.0
     # Optional per-tech rewards; falls back to research_reward when missing.
     research_reward_map: Dict[str, float] = field(default_factory=dict)
     move_reward: float = 0.02
@@ -34,6 +37,10 @@ class MapConfig:
     food_growth: int = 20
     city_unit_cap: int = 6
     city_size_norm: int = 10
+    # Base defense multiplier for units defending inside a city.
+    city_defense_multiplier: float = 1.5
+    # Additional defense multiplier for units defending in a city with City Walls.
+    city_walls_defense_multiplier: float = 2.0
     city_capture_reward: float = 5.0
 
 

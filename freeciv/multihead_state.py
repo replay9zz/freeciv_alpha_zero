@@ -37,6 +37,7 @@ class City:
     food_storage: float = 0.0
     production_target: Optional[str] = None
     production_progress: float = 0.0
+    has_city_walls: bool = False
 
 
 @dataclass
@@ -51,6 +52,7 @@ class MHUnit:
     alive: bool = True
     can_build_city: bool = False
     home_city: Optional[int] = None
+    last_move_turn: int = -1
 
 
 PRODUCTION_UNIT_NAMES: Tuple[str, ...] = (
@@ -286,6 +288,7 @@ class MultiheadState:
                     u.alive,
                     u.can_build_city,
                     u.home_city,
+                    u.last_move_turn,
                 )
                 for u in lst
             ]
@@ -300,6 +303,7 @@ class MultiheadState:
                     c.food_storage,
                     c.production_target,
                     c.production_progress,
+                    c.has_city_walls,
                 )
                 for c in lst
             ]
@@ -468,33 +472,64 @@ class MultiheadState:
         if is_attack:
             if u.atk <= 0:
                 return
+            attack_reward = getattr(self.cfg, "attack_reward", 0.0)
             enemy = self._unit_at(nx, ny, -player)
             if enemy:
-                self._attack(player, u, enemy)
+                if attack_reward:
+                    self.scores[player] += attack_reward
+                    attack_reward = 0.0
+                self._attack(player, u, enemy, -player)
                 if enemy.alive:
                     return
                 if not u.alive:
                     return
                 city_idx = self._city_at_index(nx, ny, -player)
                 if city_idx is not None:
+                    if attack_reward:
+                        self.scores[player] += attack_reward
+                        attack_reward = 0.0
                     self._attack_city(player, u, -player, city_idx)
             else:
                 city_idx = self._city_at_index(nx, ny, -player)
                 if city_idx is not None:
+                    if attack_reward:
+                        self.scores[player] += attack_reward
+                        attack_reward = 0.0
                     self._attack_city(player, u, -player, city_idx)
         else:
             # Move if no friendly blocking
             if self._unit_at(nx, ny, player) is None:
                 u.x, u.y = nx, ny
+                u.last_move_turn = self.turn
                 if not self.visited[player][ny, nx]:
                     self.visited[player][ny, nx] = True
                     self.scores[player] += self.cfg.move_reward
 
-    def _attack(self, player: Player, attacker: MHUnit, defender: MHUnit) -> None:
+    def _attack(
+        self,
+        player: Player,
+        attacker: MHUnit,
+        defender: MHUnit,
+        defender_player: Player,
+    ) -> None:
         if attacker.atk <= 0:
             return
         atk = max(1, attacker.atk)
         df = max(1, defender.df)
+        city = self._city_at(defender.x, defender.y, defender_player)
+        if city is not None:
+            df *= max(0.1, getattr(self.cfg, "city_defense_multiplier", 1.0))
+            if city.has_city_walls:
+                df *= max(
+                    0.1, getattr(self.cfg, "city_walls_defense_multiplier", 1.0)
+                )
+        fatigue_mult = getattr(self.cfg, "move_fatigue_defense_multiplier", 1.0)
+        if (
+            fatigue_mult != 1.0
+            and self.turn > 0
+            and defender.last_move_turn == self.turn - 1
+        ):
+            df = max(0.1, df * fatigue_mult)
         p_hit = atk / float(atk + df)
         while attacker.hp > 0 and defender.hp > 0:
             if self.rng.random() < p_hit:
@@ -559,10 +594,12 @@ class MultiheadState:
             if u.alive and u.home_city == city_idx
         )
 
-    def _add_city(self, player: Player, x: int, y: int) -> None:
+    def _add_city(
+        self, player: Player, x: int, y: int, *, has_city_walls: bool = False
+    ) -> None:
         if len(self.cities[player]) >= self.max_cities:
             return
-        self.cities[player].append(City(x=x, y=y))
+        self.cities[player].append(City(x=x, y=y, has_city_walls=has_city_walls))
 
     def _remove_city(self, player: Player, city_idx: int) -> None:
         if city_idx < 0 or city_idx >= len(self.cities[player]):
@@ -591,6 +628,7 @@ class MultiheadState:
                 slot.alive = True
                 slot.can_build_city = unit.can_build_city
                 slot.home_city = city_idx
+                slot.last_move_turn = unit.last_move_turn
                 return True
         if len(self.units[player]) < self.max_units:
             unit.home_city = city_idx
@@ -724,38 +762,55 @@ class MultiheadState:
         unit_opp = np.zeros_like(channels[0])
         hp_me = np.zeros_like(channels[0])
         hp_opp = np.zeros_like(channels[0])
+        fatigue_me = np.zeros_like(channels[0])
+        fatigue_opp = np.zeros_like(channels[0])
         city_me = np.zeros_like(channels[0])
         city_opp = np.zeros_like(channels[0])
         city_size_me = np.zeros_like(channels[0])
         city_size_opp = np.zeros_like(channels[0])
+        city_walls_me = np.zeros_like(channels[0])
+        city_walls_opp = np.zeros_like(channels[0])
+        fatigue_turn = self.turn - 1
         for u in self.units[me]:
             if not u.alive:
                 continue
             unit_me[u.y, u.x] = 1.0
             hp_me[u.y, u.x] = u.hp / 20.0
+            if self.turn > 0 and u.last_move_turn == fatigue_turn:
+                fatigue_me[u.y, u.x] = 1.0
         for u in self.units[opp]:
             if not u.alive:
                 continue
             unit_opp[u.y, u.x] = 1.0
             hp_opp[u.y, u.x] = u.hp / 20.0
+            if self.turn > 0 and u.last_move_turn == fatigue_turn:
+                fatigue_opp[u.y, u.x] = 1.0
         for c in self.cities[me]:
             city_me[c.y, c.x] = 1.0
             city_size_me[c.y, c.x] = min(
                 1.0, float(c.size) / max(1.0, self.cfg.city_size_norm)
             )
+            if c.has_city_walls:
+                city_walls_me[c.y, c.x] = 1.0
         for c in self.cities[opp]:
             city_opp[c.y, c.x] = 1.0
             city_size_opp[c.y, c.x] = min(
                 1.0, float(c.size) / max(1.0, self.cfg.city_size_norm)
             )
+            if c.has_city_walls:
+                city_walls_opp[c.y, c.x] = 1.0
         channels.append(unit_me)
         channels.append(unit_opp)
         channels.append(hp_me)
         channels.append(hp_opp)
+        channels.append(fatigue_me)
+        channels.append(fatigue_opp)
         channels.append(city_me)
         channels.append(city_opp)
         channels.append(city_size_me)
         channels.append(city_size_opp)
+        channels.append(city_walls_me)
+        channels.append(city_walls_opp)
         # research planes
         for tech in self.RESEARCH_TECHS:
             tme = np.full_like(unit_me, 1.0 if self.research_done[me].get(tech, False) else 0.0)
