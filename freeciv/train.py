@@ -22,6 +22,7 @@ from .research_policy import (
     TECH_PREREQS,
     reward_map_from_goals,
 )
+from .ruleset_loader import load_civ2civ3_unlocks
 from .combat_game import CombatGame
 
 log = logging.getLogger(__name__)
@@ -112,6 +113,10 @@ BUILDING_VALUE_MULTIPLIERS.update(load_building_value_multipliers(_bmult_path))
 # ----------------------------------------------------------------------
 def load_tech_unlocks(path: str) -> list[dict]:
     try:
+        return load_civ2civ3_unlocks()
+    except Exception:
+        pass
+    try:
         import yaml  # type: ignore
     except Exception as exc:  # pragma: no cover - optional dep
         raise RuntimeError("PyYAML is required to load tech_unlocks.yaml") from exc
@@ -195,13 +200,13 @@ def main():
     args = parse_args()
     logging.info("Starting training with args: %s", args)
     map_cfg = MapConfig(map_w=args.map_width, map_h=args.map_height, max_turns=args.max_turns)
-    # Build research rewards from unlock values (ruleset-derived YAML)
+    # Build research rewards from civ2civ3 ruleset unlock values.
     try:
         unlock_path = Path(__file__).resolve().parent / "data" / "tech_unlocks.yaml"
         unlocks = load_tech_unlocks(unlock_path)
         unlock_reward_map = reward_map_from_unlocks(unlocks, base_reward=map_cfg.research_reward)
         map_cfg.research_reward_map = unlock_reward_map
-        logging.info("Loaded tech unlocks from %s", unlock_path)
+        logging.info("Loaded tech unlocks from civ2civ3 ruleset")
         logging.info("Research reward map (unlock-derived): %s", map_cfg.research_reward_map)
     except Exception as exc:
         logging.warning("Failed to load tech unlocks; falling back to goal propagation: %s", exc)
@@ -214,7 +219,7 @@ def main():
             child_ratios=TECH_CHILD_INHERITANCE,
         )
         logging.info("Research reward map built: %s", map_cfg.research_reward_map)
-    provider = RandomMapProvider(map_cfg.map_w, map_cfg.map_h)
+    provider = RandomMapProvider(map_cfg.map_w, map_cfg.map_h, p_open=1.0)
     if args.mode == 'combat':
         game = CombatGame(map_cfg, provider)
         logging.info("Using combat training mode (multi-unit attack-focused).")

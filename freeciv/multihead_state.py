@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from pathlib import Path
 from typing import Dict, List, Optional, Tuple
 
 import numpy as np
@@ -11,7 +10,7 @@ from freeciv_rl.freeciv_movement import FreecivMovement
 from .config import MapConfig
 from .providers import BaseProvider, GroundTruth
 from .research_policy import RESEARCH_TECHS, TARGET_TECH_NAME, TECH_PREREQS
-from .train import load_tech_unlocks
+from .ruleset_loader import load_civ2civ3_ruleset
 
 Player = int  # 1 or -1
 Coord = Tuple[int, int]
@@ -30,14 +29,24 @@ class UnitSpec:
 
 
 @dataclass
+class BuildingSpec:
+    name: str
+    cost: int
+    req_techs: List[str] = field(default_factory=list)
+    req_buildings: List[str] = field(default_factory=list)
+
+
+@dataclass
 class City:
     x: int
     y: int
     size: int = 1
     food_storage: float = 0.0
+    production_kind: Optional[str] = None  # "unit" or "building"
     production_target: Optional[str] = None
     production_progress: float = 0.0
     has_city_walls: bool = False
+    buildings: set[str] = field(default_factory=set)
 
 
 @dataclass
@@ -55,51 +64,45 @@ class MHUnit:
     last_move_turn: int = -1
 
 
-PRODUCTION_UNIT_NAMES: Tuple[str, ...] = (
-    "Settlers",
-    "Migrants",
-    "Workers",
-    "Warriors",
-    "Phalanx",
-    "Archers",
-    "Legion",
-    "Explorer",
-    "Trireme",
-    "Horsemen",
-    "Diplomat",
+_RULESET = load_civ2civ3_ruleset()
+
+PRODUCTION_UNIT_NAMES: Tuple[str, ...] = tuple(rule.name for rule in _RULESET.units)
+PRODUCTION_BUILDING_NAMES: Tuple[str, ...] = tuple(
+    rule.name for rule in _RULESET.buildings
+)
+PRODUCTION_ITEM_NAMES: Tuple[Tuple[str, str], ...] = tuple(
+    [("unit", name) for name in PRODUCTION_UNIT_NAMES]
+    + [("building", name) for name in PRODUCTION_BUILDING_NAMES]
 )
 
-
-def _load_unit_specs() -> Tuple[Dict[str, UnitSpec], Dict[str, Optional[str]]]:
-    unlocks = load_tech_unlocks(
-        str(Path(__file__).resolve().parent / "data" / "tech_unlocks.yaml")
+UNIT_SPECS: Dict[str, UnitSpec] = {}
+UNIT_TECHS: Dict[str, List[str]] = {}
+for rule in _RULESET.units:
+    can_build = "Cities" in rule.flags
+    UNIT_SPECS[rule.name] = UnitSpec(
+        name=rule.name,
+        atk=rule.attack,
+        df=rule.defense,
+        hp=rule.hp,
+        firepower=rule.firepower,
+        moves=rule.moves,
+        cost=rule.cost,
+        can_build_city=can_build,
     )
-    specs: Dict[str, UnitSpec] = {}
-    unit_tech: Dict[str, Optional[str]] = {}
-    for entry in unlocks:
-        tech = entry.get("tech")
-        for ent in entry.get("unlocks", []):
-            if ent.get("kind") != "unit":
-                continue
-            name = ent.get("name")
-            if name not in PRODUCTION_UNIT_NAMES:
-                continue
-            spec = UnitSpec(
-                name=name,
-                atk=int(ent.get("attack", 0)),
-                df=int(ent.get("defense", 0)),
-                hp=int(ent.get("hp", 1)),
-                firepower=int(ent.get("firepower", 1)),
-                moves=int(ent.get("moves", 1)),
-                cost=int(ent.get("cost", 1)),
-                can_build_city=name in {"Settlers", "Migrants"},
-            )
-            specs[name] = spec
-            unit_tech[name] = tech
-    return specs, unit_tech
+    UNIT_TECHS[rule.name] = list(rule.req_techs)
 
-
-UNIT_SPECS, UNIT_TECH = _load_unit_specs()
+BUILDING_SPECS: Dict[str, BuildingSpec] = {}
+BUILDING_TECHS: Dict[str, List[str]] = {}
+BUILDING_REQ_BUILDINGS: Dict[str, List[str]] = {}
+for rule in _RULESET.buildings:
+    BUILDING_SPECS[rule.name] = BuildingSpec(
+        name=rule.name,
+        cost=rule.cost,
+        req_techs=list(rule.req_techs),
+        req_buildings=list(rule.req_buildings),
+    )
+    BUILDING_TECHS[rule.name] = list(rule.req_techs)
+    BUILDING_REQ_BUILDINGS[rule.name] = list(rule.req_buildings)
 
 
 @dataclass
@@ -137,6 +140,8 @@ class MultiheadState:
     # After unit actions: research actions | pass
     RESEARCH_TECHS: Tuple[str, ...] = RESEARCH_TECHS
     PRODUCTION_UNIT_NAMES: Tuple[str, ...] = PRODUCTION_UNIT_NAMES
+    PRODUCTION_BUILDING_NAMES: Tuple[str, ...] = PRODUCTION_BUILDING_NAMES
+    PRODUCTION_ITEM_NAMES: Tuple[Tuple[str, str], ...] = PRODUCTION_ITEM_NAMES
     MOVE_PER_UNIT = 6
     ATTACK_PER_UNIT = 6
 
@@ -150,9 +155,10 @@ class MultiheadState:
         self.ECON_RESEARCH_OFFSET = 0
         self.ECON_BUILD_CITY_OFFSET = len(self.RESEARCH_TECHS)
         self.ECON_PRODUCTION_OFFSET = self.ECON_BUILD_CITY_OFFSET + self.max_units
+        self.PRODUCTION_ITEM_COUNT = len(PRODUCTION_ITEM_NAMES)
         self.PRODUCTION_UNIT_COUNT = len(PRODUCTION_UNIT_NAMES)
         self.ECON_PASS_OFFSET = (
-            self.ECON_PRODUCTION_OFFSET + self.max_cities * self.PRODUCTION_UNIT_COUNT
+            self.ECON_PRODUCTION_OFFSET + self.max_cities * self.PRODUCTION_ITEM_COUNT
         )
         self.ECON_SIZE = self.ECON_PASS_OFFSET + 1
         self.ACTION_SIZE = self.MOVE_SIZE + self.ATTACK_SIZE + self.ECON_SIZE
@@ -297,13 +303,15 @@ class MultiheadState:
         new.cities = {
             p: [
                 City(
-                    c.x,
-                    c.y,
-                    c.size,
-                    c.food_storage,
-                    c.production_target,
-                    c.production_progress,
-                    c.has_city_walls,
+                    x=c.x,
+                    y=c.y,
+                    size=c.size,
+                    food_storage=c.food_storage,
+                    production_kind=c.production_kind,
+                    production_target=c.production_target,
+                    production_progress=c.production_progress,
+                    has_city_walls=c.has_city_walls,
+                    buildings=set(c.buildings),
                 )
                 for c in lst
             ]
@@ -326,6 +334,9 @@ class MultiheadState:
         new.winner = self.winner
         new.terminal_reason = self.terminal_reason
         new.RESEARCH_TECHS = self.RESEARCH_TECHS
+        new.PRODUCTION_UNIT_NAMES = self.PRODUCTION_UNIT_NAMES
+        new.PRODUCTION_BUILDING_NAMES = self.PRODUCTION_BUILDING_NAMES
+        new.PRODUCTION_ITEM_NAMES = self.PRODUCTION_ITEM_NAMES
         new.MOVE_PER_UNIT = self.MOVE_PER_UNIT
         new.ATTACK_PER_UNIT = self.ATTACK_PER_UNIT
         new.MOVE_SIZE = self.MOVE_SIZE
@@ -335,6 +346,7 @@ class MultiheadState:
         new.ECON_BUILD_CITY_OFFSET = self.ECON_BUILD_CITY_OFFSET
         new.ECON_PRODUCTION_OFFSET = self.ECON_PRODUCTION_OFFSET
         new.ECON_PASS_OFFSET = self.ECON_PASS_OFFSET
+        new.PRODUCTION_ITEM_COUNT = self.PRODUCTION_ITEM_COUNT
         new.PRODUCTION_UNIT_COUNT = self.PRODUCTION_UNIT_COUNT
         new.ACTION_SIZE = self.ACTION_SIZE
         new.PASS_ACTION = self.PASS_ACTION
@@ -389,12 +401,19 @@ class MultiheadState:
         # production actions (per city slot)
         prod_offset = offset + self.ECON_PRODUCTION_OFFSET
         for city_idx in range(min(len(self.cities[player]), self.max_cities)):
-            if self._city_unit_count(player, city_idx) >= self.cfg.city_unit_cap:
-                continue
-            for unit_idx, unit_name in enumerate(PRODUCTION_UNIT_NAMES):
-                if not self._unit_unlocked(player, unit_name):
-                    continue
-                moves[prod_offset + city_idx * self.PRODUCTION_UNIT_COUNT + unit_idx] = 1
+            city = self.cities[player][city_idx]
+            for item_idx, (kind, name) in enumerate(PRODUCTION_ITEM_NAMES):
+                if kind == "unit":
+                    if self._city_unit_count(player, city_idx) >= self.cfg.city_unit_cap:
+                        continue
+                    if not self._unit_unlocked(player, name):
+                        continue
+                else:
+                    if not self._building_unlocked(player, city, name):
+                        continue
+                moves[
+                    prod_offset + city_idx * self.PRODUCTION_ITEM_COUNT + item_idx
+                ] = 1
         # pass always valid
         moves[self.PASS_ACTION] = 1
         return moves
@@ -442,15 +461,29 @@ class MultiheadState:
             # production selection
             elif self.ECON_PRODUCTION_OFFSET <= econ_idx < self.ECON_PASS_OFFSET:
                 rel = econ_idx - self.ECON_PRODUCTION_OFFSET
-                city_slot = rel // self.PRODUCTION_UNIT_COUNT
-                unit_idx = rel % self.PRODUCTION_UNIT_COUNT
+                city_slot = rel // self.PRODUCTION_ITEM_COUNT
+                item_idx = rel % self.PRODUCTION_ITEM_COUNT
                 if city_slot < len(self.cities[player]):
-                    unit_name = PRODUCTION_UNIT_NAMES[unit_idx]
-                    if self._unit_unlocked(player, unit_name):
-                        city = self.cities[player][city_slot]
-                        if city.production_target != unit_name:
-                            city.production_target = unit_name
-                            city.production_progress = 0.0
+                    city = self.cities[player][city_slot]
+                    kind, name = PRODUCTION_ITEM_NAMES[item_idx]
+                    if kind == "unit":
+                        if self._unit_unlocked(player, name):
+                            if (
+                                city.production_kind != "unit"
+                                or city.production_target != name
+                            ):
+                                city.production_kind = "unit"
+                                city.production_target = name
+                                city.production_progress = 0.0
+                    else:
+                        if self._building_unlocked(player, city, name):
+                            if (
+                                city.production_kind != "building"
+                                or city.production_target != name
+                            ):
+                                city.production_kind = "building"
+                                city.production_target = name
+                                city.production_progress = 0.0
         self._resolve_terminal()
         # Stay in the same turn unless we exceed the per-turn action cap.
         self.actions_this_turn += 1
@@ -582,10 +615,25 @@ class MultiheadState:
         return None
 
     def _unit_unlocked(self, player: Player, unit_name: str) -> bool:
-        tech = UNIT_TECH.get(unit_name)
-        if tech is None:
+        techs = UNIT_TECHS.get(unit_name, [])
+        if not techs:
             return True
-        return self.research_done[player].get(tech, False)
+        return all(self.research_done[player].get(tech, False) for tech in techs)
+
+    def _building_unlocked(
+        self, player: Player, city: City, building_name: str
+    ) -> bool:
+        if building_name in city.buildings:
+            return False
+        techs = BUILDING_TECHS.get(building_name, [])
+        if techs and not all(
+            self.research_done[player].get(tech, False) for tech in techs
+        ):
+            return False
+        req_buildings = BUILDING_REQ_BUILDINGS.get(building_name, [])
+        if req_buildings and not all(req in city.buildings for req in req_buildings):
+            return False
+        return True
 
     def _city_unit_count(self, player: Player, city_idx: int) -> int:
         return sum(
@@ -599,7 +647,10 @@ class MultiheadState:
     ) -> None:
         if len(self.cities[player]) >= self.max_cities:
             return
-        self.cities[player].append(City(x=x, y=y, has_city_walls=has_city_walls))
+        city = City(x=x, y=y, has_city_walls=has_city_walls)
+        if has_city_walls:
+            city.buildings.add("City Walls")
+        self.cities[player].append(city)
 
     def _remove_city(self, player: Player, city_idx: int) -> None:
         if city_idx < 0 or city_idx >= len(self.cities[player]):
@@ -691,11 +742,26 @@ class MultiheadState:
                     city.food_storage = max(0.0, city.food_storage + food_surplus)
 
                 city.production_progress += total_shields
-                if city.production_target:
+                if city.production_target and city.production_kind == "unit":
                     spec = UNIT_SPECS.get(city.production_target)
                     if spec and city.production_progress >= spec.cost:
-                        if self._spawn_from_city(player, city_idx, city.production_target):
+                        if self._spawn_from_city(
+                            player, city_idx, city.production_target
+                        ):
                             city.production_progress -= spec.cost
+                elif city.production_target and city.production_kind == "building":
+                    spec = BUILDING_SPECS.get(city.production_target)
+                    if (
+                        spec
+                        and city.production_progress >= spec.cost
+                        and city.production_target not in city.buildings
+                    ):
+                        city.buildings.add(city.production_target)
+                        if city.production_target == "City Walls":
+                            city.has_city_walls = True
+                        city.production_progress -= spec.cost
+                        city.production_kind = None
+                        city.production_target = None
 
                 # Research via trade is not modeled yet; research is action-based.
 

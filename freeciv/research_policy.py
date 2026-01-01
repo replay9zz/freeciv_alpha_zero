@@ -1,30 +1,25 @@
 from __future__ import annotations
 
-from typing import Dict, List, Optional, Tuple
+from typing import Dict, List, Optional, Sequence, Tuple
 
-# Core tech list for the minimal ruleset we are training on.
-# Order defines the action indices in the RL environment.
-RESEARCH_TECHS: Tuple[str, ...] = (
-    "Alphabet",
-    "Masonry",
-    "Ceremonial Burial",
-    "Horseback Riding",
-    "Bronze Working",
-    "Pottery",
-    "Warrior Code",
-    "Code of Laws",
-    "Map Making",
-    "Writing",
-    "Mathematics",
-    "Mysticism",
-    "Polytheism",
-    "The Wheel",
-    "Currency",
-    "Iron Working",
-)
+from .ruleset_loader import load_civ2civ3_techs
+
+# Core tech list for civ2civ3 ruleset (order defines action indices).
+RESEARCH_TECHS, TECH_PREREQS = load_civ2civ3_techs()
 
 # The primary milestone tech to mark research completion.
 TARGET_TECH_NAME: str = "Iron Working"
+
+# Preferred research sequence for deterministic scenarios.
+# Note: "Howitzer" is a unit; its unlock tech is "Robotics".
+RESEARCH_PRIORITY_CHAIN: Tuple[str, ...] = (
+    "Warrior Code",
+    "Bronze Working",
+    "Monarchy",
+    "Gunpowder",
+    "Democracy",
+    "Robotics",
+)
 
 
 def tech_index_map() -> dict[str, int]:
@@ -32,27 +27,66 @@ def tech_index_map() -> dict[str, int]:
     return {name: idx for idx, name in enumerate(RESEARCH_TECHS)}
 
 
+def pick_next_goal_tech(
+    goal: str,
+    flags: Dict[str, bool],
+    prereqs: Optional[Dict[str, List[str]]] = None,
+) -> Optional[str]:
+    """
+    Pick the next tech on the path to goal, respecting explicit prereqs.
+    """
+    idx_map = tech_index_map()
+    if goal not in idx_map:
+        return None
+    if flags.get(goal, False):
+        return goal
+    prereq_map = prereqs or TECH_PREREQS
+    seen: set[str] = set()
+
+    def walk(tech: str) -> Optional[str]:
+        if tech in seen:
+            return None
+        seen.add(tech)
+        if flags.get(tech, False):
+            return None
+        reqs = prereq_map.get(tech, [])
+        for req in reqs:
+            if flags.get(req, False):
+                continue
+            candidate = walk(req)
+            if candidate:
+                return candidate
+        return tech
+
+    return walk(goal)
+
+
+def pick_next_priority_tech(
+    flags: Dict[str, bool],
+    priority_chain: Optional[Sequence[str]] = None,
+    prereqs: Optional[Dict[str, List[str]]] = None,
+) -> Optional[str]:
+    """
+    Pick the next tech from the priority chain (first missing entry).
+    """
+    chain = priority_chain or RESEARCH_PRIORITY_CHAIN
+    idx_map = tech_index_map()
+    for tech in chain:
+        if tech not in idx_map:
+            continue
+        if flags.get(tech, False):
+            continue
+        return pick_next_goal_tech(tech, flags, prereqs=prereqs)
+    return None
+
+
 # Optional per-node inheritance ratios for the implicit binary tree.
 # Key: parent tech name -> (left_ratio, right_ratio)
 TECH_INHERITANCE: Dict[str, Tuple[float, float]] = {}
 # Optional per-child ratios keyed by (parent -> child_name -> ratio).
 # This is safer when req1/req2 order might swap in the UI but names stay stable.
-TECH_CHILD_INHERITANCE: Dict[str, Dict[str, float]] = {
-    # Prioritize Warrior Code over Bronze Working when chasing Iron Working.
-    "Iron Working": {"Bronze Working": 0.3, "Warrior Code": 0.7},
-}
-# Optional explicit prerequisite mapping (parent -> [req1, req2, ...]) to mirror techs.ruleset.
-TECH_PREREQS: Dict[str, List[str]] = {
-    "Writing": ["Alphabet"],
-    "Code of Laws": ["Alphabet"],
-    "Mathematics": ["Alphabet", "Masonry"],
-    "Mysticism": ["Ceremonial Burial"],
-    "Map Making": ["Alphabet"],
-    "Polytheism": ["Alphabet", "Horseback Riding"],
-    "The Wheel": ["Horseback Riding"],
-    "Currency": ["Bronze Working"],
-    "Iron Working": ["Bronze Working", "Warrior Code"],
-}
+TECH_CHILD_INHERITANCE: Dict[str, Dict[str, float]] = {}
+# TECH_PREREQS is loaded from civ2civ3 techs.ruleset above.
 
 
 def _child_indices(index: int) -> Tuple[Optional[int], Optional[int]]:

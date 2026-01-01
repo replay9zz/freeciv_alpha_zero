@@ -61,7 +61,12 @@ from freeciv_alpha_zero.freeciv.multihead_state import MHUnit, MultiheadState
 from freeciv_alpha_zero.freeciv.nnet import NNetWrapper
 from freeciv_alpha_zero.freeciv.providers import GroundTruth
 from freeciv_alpha_zero.freeciv.state import FreecivBoardState
-from freeciv_alpha_zero.freeciv.research_policy import TARGET_TECH_NAME, TECH_PREREQS
+from freeciv_alpha_zero.freeciv.research_policy import (
+    TARGET_TECH_NAME,
+    TECH_PREREQS,
+    pick_next_goal_tech,
+    pick_next_priority_tech,
+)
 from freeciv_alpha_zero.freeciv.explore_policy import (
     choose_action,
     fallback_move_direction,
@@ -258,13 +263,6 @@ def pick_production_target(research_flags: Dict[str, bool], unit_values: Dict[st
     Choose the highest-value unlocked unit given known techs.
     Falls back to Warriors if nothing else is unlocked.
     """
-    # Simple aggression tweak: if Archers are unlocked, prefer them over Warriors to
-    # get more ranged attackers for city sieges.
-    if research_flags.get("Warrior Code", False) and "Archers" in unit_values:
-        arch_req, _arch_val = unit_values["Archers"]
-        if not arch_req or research_flags.get(arch_req, False):
-            return "Archers"
-
     best_name = "Warriors"
     best_val = -1.0
     for name, (req_tech, val) in unit_values.items():
@@ -289,25 +287,13 @@ def queue_city_production(
     """
     Set production to the best unlocked unit (prefers stronger tech-gated units).
     """
-    # Prefer getting at least a small archer force on the board early (ranged city pressure/defense).
-    desired_archers = 4
-    archer_count = 0
-    if controlled_units and unit_type_labels:
-        for uid in controlled_units:
-            if "archer" in (unit_type_labels.get(uid, "") or "").lower():
-                archer_count += 1
-
-    if unit_values and "Archers" in unit_values:
-        req, _val = unit_values["Archers"]
-        archers_unlocked = not req or research_flags.get(req, False)
-        if archers_unlocked and archer_count < desired_archers:
-            target_name = "Archers"
-            print(f"[production] archer count={archer_count}/{desired_archers}; forcing Archers")
-        else:
-            target_name = pick_production_target(research_flags, unit_values)
-            print(f"[production] choose {target_name} (unlocked={research_flags.get(unit_values.get(target_name, ('',0))[0], True)})")
+    unit_values = unit_values or {}
+    target_name = pick_production_target(research_flags, unit_values)
+    if unit_values:
+        req = unit_values.get(target_name, ("", 0.0))[0]
+        unlocked = True if not req else research_flags.get(req, False)
+        print(f"[production] choose {target_name} (unlocked={unlocked})")
     else:
-        target_name = pick_production_target(research_flags, unit_values or {})
         print(f"[production] unit values unavailable; defaulting to {target_name}")
     return client.set_city_production(city_id, "UnitType", target_name)
 
@@ -364,15 +350,10 @@ def set_research_to_target(
     # Pick a tech considering prereqs for the main goal.
     if tech_name is None:
         flags = research_flags or {}
-        if not flags.get(TARGET_TECH_NAME, False):
-            # Prioritize Warrior Code -> Bronze Working -> Iron Working.
-            if not flags.get("Warrior Code", False):
-                tech_name = "Warrior Code"
-            elif not flags.get("Bronze Working", False):
-                tech_name = "Bronze Working"
-            else:
-                tech_name = TARGET_TECH_NAME
-        else:
+        tech_name = pick_next_priority_tech(flags, prereqs=TECH_PREREQS)
+        if tech_name is None:
+            tech_name = pick_next_goal_tech(TARGET_TECH_NAME, flags, prereqs=TECH_PREREQS)
+        if tech_name is None:
             tech_name = TARGET_TECH_NAME
     try:
         ok = set_player_research(client, player_id, tech_name)
@@ -501,9 +482,10 @@ def build_multihead_state(
     state.ECON_BUILD_CITY_OFFSET = len(state.RESEARCH_TECHS)
     state.max_cities = 1
     state.ECON_PRODUCTION_OFFSET = state.ECON_BUILD_CITY_OFFSET + max_units
+    state.PRODUCTION_ITEM_COUNT = len(MultiheadState.PRODUCTION_ITEM_NAMES)
     state.PRODUCTION_UNIT_COUNT = len(MultiheadState.PRODUCTION_UNIT_NAMES)
     state.ECON_PASS_OFFSET = (
-        state.ECON_PRODUCTION_OFFSET + state.max_cities * state.PRODUCTION_UNIT_COUNT
+        state.ECON_PRODUCTION_OFFSET + state.max_cities * state.PRODUCTION_ITEM_COUNT
     )
     state.ECON_SIZE = state.ECON_PASS_OFFSET + 1
     state.ACTION_SIZE = state.MOVE_SIZE + state.ATTACK_SIZE + state.ECON_SIZE
