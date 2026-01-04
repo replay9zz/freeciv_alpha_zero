@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
+from collections import deque
 from typing import Dict, List, Optional, Tuple
 
 import numpy as np
@@ -9,7 +10,16 @@ from freeciv_rl.freeciv_movement import FreecivMovement
 
 from .config import MapConfig
 from .providers import BaseProvider, GroundTruth
-from .research_policy import RESEARCH_TECHS, TARGET_TECH_NAME, TECH_PREREQS
+from .research_policy import (
+    RESEARCH_TECHS,
+    TARGET_TECH_NAME,
+    TECH_COSTS,
+    TECH_PREREQS,
+    TECH_COST_STYLE,
+    BASE_TECH_COST,
+    MIN_TECH_COST,
+    build_tech_costs,
+)
 from .ruleset_loader import load_civ2civ3_ruleset
 
 Player = int  # 1 or -1
@@ -26,6 +36,7 @@ class UnitSpec:
     moves: int
     cost: int
     can_build_city: bool = False
+    obsolete_by: Optional[str] = None
 
 
 @dataclass
@@ -34,6 +45,8 @@ class BuildingSpec:
     cost: int
     req_techs: List[str] = field(default_factory=list)
     req_buildings: List[str] = field(default_factory=list)
+    genus: str = ""
+    flags: List[str] = field(default_factory=list)
 
 
 @dataclass
@@ -77,6 +90,7 @@ PRODUCTION_ITEM_NAMES: Tuple[Tuple[str, str], ...] = tuple(
 
 UNIT_SPECS: Dict[str, UnitSpec] = {}
 UNIT_TECHS: Dict[str, List[str]] = {}
+UNIT_OBSOLETE_BY: Dict[str, Optional[str]] = {}
 for rule in _RULESET.units:
     can_build = "Cities" in rule.flags
     UNIT_SPECS[rule.name] = UnitSpec(
@@ -88,21 +102,28 @@ for rule in _RULESET.units:
         moves=rule.moves,
         cost=rule.cost,
         can_build_city=can_build,
+        obsolete_by=rule.obsolete_by,
     )
     UNIT_TECHS[rule.name] = list(rule.req_techs)
+    UNIT_OBSOLETE_BY[rule.name] = rule.obsolete_by
 
 BUILDING_SPECS: Dict[str, BuildingSpec] = {}
 BUILDING_TECHS: Dict[str, List[str]] = {}
 BUILDING_REQ_BUILDINGS: Dict[str, List[str]] = {}
+GREAT_WONDER_NAMES: set[str] = set()
 for rule in _RULESET.buildings:
     BUILDING_SPECS[rule.name] = BuildingSpec(
         name=rule.name,
         cost=rule.cost,
         req_techs=list(rule.req_techs),
         req_buildings=list(rule.req_buildings),
+        genus=rule.genus,
+        flags=list(rule.flags),
     )
     BUILDING_TECHS[rule.name] = list(rule.req_techs)
     BUILDING_REQ_BUILDINGS[rule.name] = list(rule.req_buildings)
+    if rule.genus == "GreatWonder":
+        GREAT_WONDER_NAMES.add(rule.name)
 
 
 @dataclass
@@ -123,6 +144,12 @@ class MultiheadState:
     units: Dict[Player, List[MHUnit]] = field(default_factory=lambda: {1: [], -1: []})
     cities: Dict[Player, List[City]] = field(default_factory=lambda: {1: [], -1: []})
     research_done: Dict[Player, Dict[str, bool]] = field(default_factory=lambda: {1: {}, -1: {}})
+    research_target: Dict[Player, Optional[str]] = field(
+        default_factory=lambda: {1: None, -1: None}
+    )
+    research_progress: Dict[Player, float] = field(
+        default_factory=lambda: {1: 0.0, -1: 0.0}
+    )
     visited: Dict[Player, np.ndarray] = field(default_factory=lambda: {1: None, -1: None})
     turn: int = 0
     actions_this_turn: int = 0
@@ -131,9 +158,12 @@ class MultiheadState:
         default_factory=lambda: {1: set(), -1: set()}
     )
     kills: Dict[Player, int] = field(default_factory=lambda: {1: 0, -1: 0})
+    units_built: Dict[Player, int] = field(default_factory=lambda: {1: 0, -1: 0})
+    future_techs: Dict[Player, int] = field(default_factory=lambda: {1: 0, -1: 0})
     scores: Dict[Player, float] = field(default_factory=lambda: {1: 0.0, -1: 0.0})
     winner: Optional[Player] = None
     terminal_reason: Optional[str] = None
+    tech_costs: Dict[str, float] = field(default_factory=lambda: dict(TECH_COSTS))
 
     # Action layout:
     # For each unit slot: 6 move + 6 attack = 12 actions
@@ -169,6 +199,7 @@ class MultiheadState:
             self.reset()
         if not self.research_done.get(1):
             self.research_done = self._init_research_status()
+        self._refresh_tech_costs()
 
     def _init_research_status(self) -> Dict[Player, Dict[str, bool]]:
         base = {tech: False for tech in self.RESEARCH_TECHS}
@@ -183,50 +214,75 @@ class MultiheadState:
         self.units = {1: [], -1: []}
         self.cities = {1: [], -1: []}
         self.research_done = self._init_research_status()
+        self.research_target = {1: None, -1: None}
+        self.research_progress = {1: 0.0, -1: 0.0}
         self.visited = {
             1: np.zeros((self.cfg.map_h, self.cfg.map_w), dtype=bool),
             -1: np.zeros((self.cfg.map_h, self.cfg.map_w), dtype=bool),
         }
         self.kills = {1: 0, -1: 0}
+        self.units_built = {1: 0, -1: 0}
+        self.future_techs = {1: 0, -1: 0}
         self.scores = {1: 0.0, -1: 0.0}
         self.acted_unit_slots = {1: set(), -1: set()}
+        self._refresh_tech_costs()
         self._spawn_units()
+
+    def _refresh_tech_costs(self) -> None:
+        style = getattr(self.cfg, "tech_cost_style", TECH_COST_STYLE)
+        base_cost = getattr(self.cfg, "base_tech_cost", BASE_TECH_COST)
+        min_cost = getattr(self.cfg, "min_tech_cost", MIN_TECH_COST)
+        self.tech_costs = build_tech_costs(
+            TECH_PREREQS,
+            style=style,
+            base_cost=base_cost,
+            min_cost=min_cost,
+        )
 
     def _spawn_units(self) -> None:
         assert self.gt is not None
         starts_me = [(0, 0)]
         starts_opp = [(self.cfg.map_w - 1, self.cfg.map_h - 1)]
-        settler = UNIT_SPECS.get("Settlers")
-        if settler is None:
-            raise RuntimeError("Settlers unit spec missing from tech unlocks.")
-        mx, my = self._find_spawn_near(*starts_me[0])
-        ox, oy = self._find_spawn_near(*starts_opp[0])
-        self.units[1].append(
-            MHUnit(
-                mx,
-                my,
-                settler.hp,
-                settler.atk,
-                settler.df,
-                settler.firepower,
-                settler.name,
-                True,
-                settler.can_build_city,
+        spawn_units = ("Settlers", "Workers", "Explorer", "Diplomat")
+        missing = [name for name in spawn_units if name not in UNIT_SPECS]
+        if missing:
+            raise RuntimeError(
+                "Missing unit specs for start units: " + ", ".join(missing)
             )
-        )
-        self.units[-1].append(
-            MHUnit(
-                ox,
-                oy,
-                settler.hp,
-                settler.atk,
-                settler.df,
-                settler.firepower,
-                settler.name,
-                True,
-                settler.can_build_city,
+        offsets = [(0, 0), (1, 0), (0, 1), (1, 1)]
+        mx, my = starts_me[0]
+        ox, oy = starts_opp[0]
+        for idx, name in enumerate(spawn_units):
+            dx, dy = offsets[idx] if idx < len(offsets) else (0, 0)
+            spec = UNIT_SPECS[name]
+            ux, uy = self._find_spawn_near(mx + dx, my + dy)
+            self.units[1].append(
+                MHUnit(
+                    ux,
+                    uy,
+                    spec.hp,
+                    spec.atk,
+                    spec.df,
+                    spec.firepower,
+                    spec.name,
+                    True,
+                    spec.can_build_city,
+                )
             )
-        )
+            vx, vy = self._find_spawn_near(ox - dx, oy - dy)
+            self.units[-1].append(
+                MHUnit(
+                    vx,
+                    vy,
+                    spec.hp,
+                    spec.atk,
+                    spec.df,
+                    spec.firepower,
+                    spec.name,
+                    True,
+                    spec.can_build_city,
+                )
+            )
         self._ensure_unit_slots()
         for player in (1, -1):
             for u in self.units[player]:
@@ -271,6 +327,32 @@ class MultiheadState:
                 seen.add((nx, ny))
                 frontier.append((nx, ny))
         return sx, sy
+
+    def _city_spacing_ok(self, player: Player, x: int, y: int) -> bool:
+        min_dist = getattr(self.cfg, "city_min_distance", 0)
+        if min_dist <= 0:
+            return True
+        if not self.cities.get(player):
+            return True
+        frontier = deque()
+        frontier.append((x, y, 0))
+        seen = {(x, y)}
+        while frontier:
+            cx, cy, dist = frontier.popleft()
+            if dist >= min_dist:
+                continue
+            if self._city_at(cx, cy, player) is not None:
+                return False
+            for nx, ny in self.movement.get_native_neighbors(cx, cy):
+                if nx is None or ny is None:
+                    continue
+                if (nx, ny) in seen:
+                    continue
+                if self.gt and self.gt.au_map[ny, nx] != "A":
+                    continue
+                seen.add((nx, ny))
+                frontier.append((nx, ny, dist + 1))
+        return True
 
     def duplicate(self) -> "MultiheadState":
         new = MultiheadState.__new__(MultiheadState)
@@ -318,6 +400,12 @@ class MultiheadState:
             for p, lst in self.cities.items()
         }
         new.research_done = {p: dict(flags) for p, flags in self.research_done.items()}
+        new.research_target = {
+            p: target for p, target in self.research_target.items()
+        }
+        new.research_progress = {
+            p: float(val) for p, val in self.research_progress.items()
+        }
         new.visited = {
             1: self.visited[1].copy(),
             -1: self.visited[-1].copy(),
@@ -330,9 +418,12 @@ class MultiheadState:
             -1: set(self.acted_unit_slots.get(-1, set())),
         }
         new.kills = dict(self.kills)
+        new.units_built = dict(self.units_built)
+        new.future_techs = dict(self.future_techs)
         new.scores = dict(self.scores)
         new.winner = self.winner
         new.terminal_reason = self.terminal_reason
+        new.tech_costs = dict(self.tech_costs)
         new.RESEARCH_TECHS = self.RESEARCH_TECHS
         new.PRODUCTION_UNIT_NAMES = self.PRODUCTION_UNIT_NAMES
         new.PRODUCTION_BUILDING_NAMES = self.PRODUCTION_BUILDING_NAMES
@@ -379,15 +470,21 @@ class MultiheadState:
                         or self._city_at(nx, ny, -player) is not None
                     ):
                         moves[atk_base + dir_idx] = 1
-        # research actions (one-time per tech)
+        # research actions (select current target)
         offset = self.MOVE_SIZE + self.ATTACK_SIZE
-        for idx, tech in enumerate(self.RESEARCH_TECHS):
-            if self.research_done[player].get(tech, False):
-                continue
-            prereqs = TECH_PREREQS.get(tech, [])
-            if any(not self.research_done[player].get(req, False) for req in prereqs):
-                continue
-            moves[offset + idx] = 1
+        current_target = self.research_target.get(player)
+        if current_target and self.research_done[player].get(current_target, False):
+            current_target = None
+        if current_target is None:
+            for idx, tech in enumerate(self.RESEARCH_TECHS):
+                if self.research_done[player].get(tech, False):
+                    continue
+                prereqs = TECH_PREREQS.get(tech, [])
+                if any(
+                    not self.research_done[player].get(req, False) for req in prereqs
+                ):
+                    continue
+                moves[offset + idx] = 1
         # build city actions (per unit slot)
         build_offset = offset + self.ECON_BUILD_CITY_OFFSET
         if len(self.cities[player]) < self.max_cities:
@@ -397,6 +494,8 @@ class MultiheadState:
                     continue
                 if self._city_at(u.x, u.y, player) is not None:
                     continue
+                if not self._city_spacing_ok(player, u.x, u.y):
+                    continue
                 moves[build_offset + idx] = 1
         # production actions (per city slot)
         prod_offset = offset + self.ECON_PRODUCTION_OFFSET
@@ -404,9 +503,13 @@ class MultiheadState:
             city = self.cities[player][city_idx]
             for item_idx, (kind, name) in enumerate(PRODUCTION_ITEM_NAMES):
                 if kind == "unit":
+                    if name == "Settlers" and city.size <= 1:
+                        continue
                     if self._city_unit_count(player, city_idx) >= self.cfg.city_unit_cap:
                         continue
                     if not self._unit_unlocked(player, name):
+                        continue
+                    if self._unit_obsolete(player, name):
                         continue
                 else:
                     if not self._building_unlocked(player, city, name):
@@ -441,19 +544,27 @@ class MultiheadState:
             # research
             if 0 <= econ_idx < len(self.RESEARCH_TECHS):
                 tech = self.RESEARCH_TECHS[econ_idx]
-                if not self.research_done[player].get(tech, False):
-                    self.research_done[player][tech] = True
-                    reward = self.cfg.research_reward_map.get(
-                        tech, self.cfg.research_reward
-                    )
-                    self.scores[player] += reward
+                if (
+                    not self.research_done[player].get(tech, False)
+                    and self.research_target.get(player) != tech
+                ):
+                    prereqs = TECH_PREREQS.get(tech, [])
+                    if all(
+                        self.research_done[player].get(req, False) for req in prereqs
+                    ):
+                        self.research_target[player] = tech
                 # small bonus hooks can be added later
             # build city (per unit slot)
             elif self.ECON_BUILD_CITY_OFFSET <= econ_idx < self.ECON_PRODUCTION_OFFSET:
                 unit_idx = econ_idx - self.ECON_BUILD_CITY_OFFSET
                 if unit_idx < len(self.units[player]) and len(self.cities[player]) < self.max_cities:
                     u = self.units[player][unit_idx]
-                    if u.alive and u.can_build_city and self._city_at(u.x, u.y, player) is None:
+                    if (
+                        u.alive
+                        and u.can_build_city
+                        and self._city_at(u.x, u.y, player) is None
+                        and self._city_spacing_ok(player, u.x, u.y)
+                    ):
                         u.alive = False
                         self._add_city(player, u.x, u.y)
                         self.scores[player] += self.cfg.build_city_reward
@@ -620,9 +731,26 @@ class MultiheadState:
             return True
         return all(self.research_done[player].get(tech, False) for tech in techs)
 
+    def _unit_is_obsolete_exempt(self, unit_name: str) -> bool:
+        label = (unit_name or "").lower()
+        return any(tag in label for tag in ("settler", "worker", "engineer", "migrant"))
+
+    def _unit_obsolete(self, player: Player, unit_name: str) -> bool:
+        if self._unit_is_obsolete_exempt(unit_name):
+            return False
+        obsolete_by = UNIT_OBSOLETE_BY.get(unit_name)
+        if not obsolete_by:
+            return False
+        return self._unit_unlocked(player, obsolete_by)
+
+    def _building_is_palace(self, building_name: str) -> bool:
+        return "palace" in (building_name or "").lower()
+
     def _building_unlocked(
         self, player: Player, city: City, building_name: str
     ) -> bool:
+        if self._building_is_palace(building_name):
+            return False
         if building_name in city.buildings:
             return False
         techs = BUILDING_TECHS.get(building_name, [])
@@ -721,16 +849,28 @@ class MultiheadState:
                     spec.can_build_city,
                     city_idx,
                 )
-                return self._place_unit(player, unit, city_idx)
+                if self._place_unit(player, unit, city_idx):
+                    self.units_built[player] = self.units_built.get(player, 0) + 1
+                    return True
+                return False
         return False
 
     def _apply_city_economy(self) -> None:
+        bulbs_by_player = {1: 0.0, -1: 0.0}
         for player in (1, -1):
             for city_idx, city in enumerate(self.cities[player]):
                 size = max(1, city.size)
                 total_food = self.cfg.city_food + self.cfg.grass_food * size
-                total_shields = self.cfg.city_shield + self.cfg.grass_shield * size
+                total_shields = (
+                    self.cfg.city_shield + self.cfg.grass_shield * size
+                ) * getattr(self.cfg, "production_rate_multiplier", 1.0)
                 total_trade = self.cfg.city_trade + self.cfg.grass_trade * size
+                science_rate = getattr(self.cfg, "tax_science_rate", 0.0)
+                bulbs_by_player[player] += (
+                    total_trade
+                    * science_rate
+                    * getattr(self.cfg, "research_rate_multiplier", 1.0)
+                )
 
                 food_surplus = total_food - self.cfg.food_consumption * size
                 if food_surplus > 0:
@@ -763,7 +903,34 @@ class MultiheadState:
                         city.production_kind = None
                         city.production_target = None
 
-                # Research via trade is not modeled yet; research is action-based.
+                # Research bulbs are added from trade; completion handled below.
+        self._apply_research_bulbs(bulbs_by_player)
+
+    def _apply_research_bulbs(self, bulbs_by_player: Dict[Player, float]) -> None:
+        for player, bulbs in bulbs_by_player.items():
+            if bulbs != 0:
+                self.research_progress[player] = (
+                    self.research_progress.get(player, 0.0) + bulbs
+                )
+            target = self.research_target.get(player)
+            if not target:
+                continue
+            if self.research_done[player].get(target, False):
+                self.research_target[player] = None
+                continue
+                cost = TECH_COSTS.get(target, 0.0)
+                if self.tech_costs:
+                    cost = self.tech_costs.get(target, cost)
+            if cost <= 0:
+                cost = getattr(self.cfg, "base_tech_cost", 10.0)
+            if self.research_progress[player] >= cost:
+                self.research_progress[player] -= cost
+                self.research_done[player][target] = True
+                reward = self.cfg.research_reward_map.get(
+                    target, self.cfg.research_reward
+                )
+                self.scores[player] += reward
+                self.research_target[player] = None
 
     def _resolve_terminal(self) -> None:
         alive_me = any(u.alive for u in self.units[1]) or bool(self.cities[1])
@@ -792,6 +959,28 @@ class MultiheadState:
 
     def _hp_sum(self, player: Player) -> int:
         return sum(u.hp for u in self.units[player] if u.alive)
+
+    def civilization_score(self, player: Player) -> float:
+        pop = sum(city.size for city in self.cities[player])
+        techs = sum(1 for done in self.research_done[player].values() if done)
+        future = self.future_techs.get(player, 0)
+        wonders = sum(
+            1
+            for city in self.cities[player]
+            for building in city.buildings
+            if building in GREAT_WONDER_NAMES
+        )
+        units_built = self.units_built.get(player, 0)
+        kills = self.kills.get(player, 0)
+        score = (
+            pop * self.cfg.score_population
+            + techs * self.cfg.score_tech
+            + future * self.cfg.score_future_tech
+            + wonders * self.cfg.score_great_wonder
+            + units_built * self.cfg.score_units_built
+            + kills * self.cfg.score_units_killed
+        )
+        return float(score)
 
     def heuristic_score(self, player: Player) -> int:
         """

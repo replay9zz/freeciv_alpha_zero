@@ -24,6 +24,7 @@ class UnitRule:
     moves: int
     req_techs: List[str]
     flags: List[str]
+    obsolete_by: Optional[str]
 
 
 @dataclass(frozen=True)
@@ -48,7 +49,7 @@ _QUOTED_RE = re.compile(r"\"([^\"]+)\"")
 
 
 def _ruleset_dir() -> Path:
-    root = Path(__file__).resolve().parents[3]
+    root = Path(__file__).resolve().parents[2]
     return root / "freeciv" / "data" / "minimal"
 
 
@@ -200,6 +201,25 @@ def load_civ2civ3_techs() -> Tuple[Tuple[str, ...], Dict[str, List[str]]]:
     return tuple(techs), prereqs
 
 
+def load_civ2civ3_research_config() -> Tuple[str, float, float]:
+    game_path = _ruleset_dir() / "game.ruleset"
+    sections = _parse_ruleset_sections(game_path, "research")
+    if not sections:
+        return "Linear", 10.0, 10.0
+    fields = sections[0]["fields"]
+    style_raw = _extract_first_quoted(str(fields.get("tech_cost_style", "Linear")))
+    style = style_raw or "Linear"
+    try:
+        base_cost = float(fields.get("base_tech_cost", 10))
+    except Exception:
+        base_cost = 10.0
+    try:
+        min_cost = float(fields.get("min_tech_cost", base_cost))
+    except Exception:
+        min_cost = base_cost
+    return style, base_cost, min_cost
+
+
 def load_civ2civ3_units() -> Tuple[UnitRule, ...]:
     units_path = _ruleset_dir() / "units.ruleset"
     sections = _parse_ruleset_sections(units_path, "unit_")
@@ -230,6 +250,11 @@ def load_civ2civ3_units() -> Tuple[UnitRule, ...]:
             attack, defense, hp, firepower, moves = 0, 0, 1, 1, 1
         reqs = entry.get("reqs", [])
         req_techs = _reqs_by_type(reqs, "Tech")
+        obsolete_raw = _extract_first_quoted(str(fields.get("obsolete_by", "")))
+        obsolete_name = _normalize_name(obsolete_raw) if obsolete_raw else ""
+        obsolete_by = None
+        if obsolete_name and obsolete_name not in {"None", "Never"}:
+            obsolete_by = obsolete_name
         rules.append(
             UnitRule(
                 name=name,
@@ -241,6 +266,7 @@ def load_civ2civ3_units() -> Tuple[UnitRule, ...]:
                 moves=moves,
                 req_techs=req_techs,
                 flags=flags,
+                obsolete_by=obsolete_by,
             )
         )
     return tuple(rules)

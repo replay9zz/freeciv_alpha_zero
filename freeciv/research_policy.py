@@ -1,11 +1,13 @@
 from __future__ import annotations
 
+import math
 from typing import Dict, List, Optional, Sequence, Tuple
 
-from .ruleset_loader import load_civ2civ3_techs
+from .ruleset_loader import load_civ2civ3_research_config, load_civ2civ3_techs
 
 # Core tech list for civ2civ3 ruleset (order defines action indices).
 RESEARCH_TECHS, TECH_PREREQS = load_civ2civ3_techs()
+TECH_COST_STYLE, BASE_TECH_COST, MIN_TECH_COST = load_civ2civ3_research_config()
 
 # The primary milestone tech to mark research completion.
 TARGET_TECH_NAME: str = "Iron Working"
@@ -87,6 +89,61 @@ TECH_INHERITANCE: Dict[str, Tuple[float, float]] = {}
 # This is safer when req1/req2 order might swap in the UI but names stay stable.
 TECH_CHILD_INHERITANCE: Dict[str, Dict[str, float]] = {}
 # TECH_PREREQS is loaded from civ2civ3 techs.ruleset above.
+
+
+def _collect_prereqs(
+    tech: str,
+    prereqs: Dict[str, List[str]],
+    memo: Dict[str, set[str]],
+) -> set[str]:
+    if tech in memo:
+        return memo[tech]
+    out: set[str] = set()
+    for req in prereqs.get(tech, []):
+        out.add(req)
+        out.update(_collect_prereqs(req, prereqs, memo))
+    memo[tech] = out
+    return out
+
+
+def _tech_cost(req_count: int, style: str, base_cost: float) -> float:
+    label = (style or "").strip().lower()
+    reqs = max(0, req_count)
+    if label == "linear":
+        return base_cost * (reqs + 1.0)
+    if label in {"classic", "classic+"}:
+        return base_cost * (1.0 + reqs) * math.sqrt(1.0 + reqs) / 2.0
+    if label in {"experimental", "experimental+"}:
+        return base_cost * (
+            (reqs ** 2) / (1.0 + math.sqrt(math.sqrt(reqs + 1.0))) - 0.5
+        )
+    return base_cost * max(1.0, reqs)
+
+
+def _round_cost(value: float) -> int:
+    if value <= 0:
+        return 0
+    return int(math.floor(value + 0.5))
+
+
+def build_tech_costs(
+    prereqs: Dict[str, List[str]],
+    *,
+    style: str = TECH_COST_STYLE,
+    base_cost: float = BASE_TECH_COST,
+    min_cost: float = MIN_TECH_COST,
+) -> Dict[str, float]:
+    memo: Dict[str, set[str]] = {}
+    costs: Dict[str, float] = {}
+    min_cost_val = _round_cost(min_cost)
+    for tech in RESEARCH_TECHS:
+        reqs = _collect_prereqs(tech, prereqs, memo)
+        raw = _tech_cost(len(reqs), style, base_cost)
+        costs[tech] = max(min_cost_val, _round_cost(raw))
+    return costs
+
+
+TECH_COSTS: Dict[str, float] = build_tech_costs(TECH_PREREQS)
 
 
 def _child_indices(index: int) -> Tuple[Optional[int], Optional[int]]:

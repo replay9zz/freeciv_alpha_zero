@@ -64,6 +64,7 @@ from freeciv_alpha_zero.freeciv.state import FreecivBoardState
 from freeciv_alpha_zero.freeciv.research_policy import (
     TARGET_TECH_NAME,
     TECH_PREREQS,
+    build_tech_costs,
     pick_next_goal_tech,
     pick_next_priority_tech,
 )
@@ -438,6 +439,14 @@ def build_multihead_state(
     state.units = {1: [], -1: []}
     state.cities = {1: [], -1: []}
     state.research_done = {1: {}, -1: {}}
+    state.research_target = {1: None, -1: None}
+    state.research_progress = {1: 0.0, -1: 0.0}
+    state.tech_costs = build_tech_costs(
+        TECH_PREREQS,
+        style=cfg.tech_cost_style,
+        base_cost=cfg.base_tech_cost,
+        min_cost=cfg.min_tech_cost,
+    )
     state.turn = 0
     state.actions_this_turn = 0
     state.max_actions_per_turn = max(1, max_units * 2)
