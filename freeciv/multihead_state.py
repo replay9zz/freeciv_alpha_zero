@@ -918,9 +918,9 @@ class MultiheadState:
             if self.research_done[player].get(target, False):
                 self.research_target[player] = None
                 continue
-                cost = TECH_COSTS.get(target, 0.0)
-                if self.tech_costs:
-                    cost = self.tech_costs.get(target, cost)
+            cost = TECH_COSTS.get(target, 0.0)
+            if self.tech_costs:
+                cost = self.tech_costs.get(target, cost)
             if cost <= 0:
                 cost = getattr(self.cfg, "base_tech_cost", 10.0)
             if self.research_progress[player] >= cost:
