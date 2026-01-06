@@ -201,6 +201,27 @@ def load_civ2civ3_techs() -> Tuple[Tuple[str, ...], Dict[str, List[str]]]:
     return tuple(techs), prereqs
 
 
+def load_civ2civ3_tech_cost_factor() -> float:
+    effects_path = _ruleset_dir() / "effects.ruleset"
+    sections = _parse_ruleset_sections(effects_path, "effect_")
+    best: Optional[float] = None
+    for entry in sections:
+        fields = entry.get("fields", {})
+        effect_type = _extract_first_quoted(str(fields.get("type", "")))
+        if effect_type != "Tech_Cost_Factor":
+            continue
+        reqs = entry.get("reqs", [])
+        if reqs:
+            continue
+        try:
+            value = float(fields.get("value", 0))
+        except Exception:
+            continue
+        if best is None or value > best:
+            best = value
+    return best if best is not None else 1.0
+
+
 def load_civ2civ3_research_config() -> Tuple[str, float, float]:
     game_path = _ruleset_dir() / "game.ruleset"
     sections = _parse_ruleset_sections(game_path, "research")

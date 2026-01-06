@@ -18,6 +18,7 @@ from .research_policy import (
     TECH_COST_STYLE,
     BASE_TECH_COST,
     MIN_TECH_COST,
+    TECH_COST_FACTOR,
     build_tech_costs,
 )
 from .ruleset_loader import load_civ2civ3_ruleset
@@ -232,11 +233,13 @@ class MultiheadState:
         style = getattr(self.cfg, "tech_cost_style", TECH_COST_STYLE)
         base_cost = getattr(self.cfg, "base_tech_cost", BASE_TECH_COST)
         min_cost = getattr(self.cfg, "min_tech_cost", MIN_TECH_COST)
+        cost_factor = getattr(self.cfg, "tech_cost_factor", TECH_COST_FACTOR)
         self.tech_costs = build_tech_costs(
             TECH_PREREQS,
             style=style,
             base_cost=base_cost,
             min_cost=min_cost,
+            cost_factor=cost_factor,
         )
 
     def _spawn_units(self) -> None:

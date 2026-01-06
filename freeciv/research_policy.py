@@ -3,11 +3,16 @@ from __future__ import annotations
 import math
 from typing import Dict, List, Optional, Sequence, Tuple
 
-from .ruleset_loader import load_civ2civ3_research_config, load_civ2civ3_techs
+from .ruleset_loader import (
+    load_civ2civ3_research_config,
+    load_civ2civ3_tech_cost_factor,
+    load_civ2civ3_techs,
+)
 
 # Core tech list for civ2civ3 ruleset (order defines action indices).
 RESEARCH_TECHS, TECH_PREREQS = load_civ2civ3_techs()
 TECH_COST_STYLE, BASE_TECH_COST, MIN_TECH_COST = load_civ2civ3_research_config()
+TECH_COST_FACTOR = load_civ2civ3_tech_cost_factor()
 
 # The primary milestone tech to mark research completion.
 TARGET_TECH_NAME: str = "Iron Working"
@@ -132,14 +137,16 @@ def build_tech_costs(
     style: str = TECH_COST_STYLE,
     base_cost: float = BASE_TECH_COST,
     min_cost: float = MIN_TECH_COST,
+    cost_factor: float = TECH_COST_FACTOR,
 ) -> Dict[str, float]:
     memo: Dict[str, set[str]] = {}
     costs: Dict[str, float] = {}
     min_cost_val = _round_cost(min_cost)
+    factor = max(0.0, float(cost_factor))
     for tech in RESEARCH_TECHS:
         reqs = _collect_prereqs(tech, prereqs, memo)
         raw = _tech_cost(len(reqs), style, base_cost)
-        costs[tech] = max(min_cost_val, _round_cost(raw))
+        costs[tech] = max(min_cost_val, _round_cost(raw * factor))
     return costs
 
 

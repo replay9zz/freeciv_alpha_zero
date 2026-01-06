@@ -446,6 +446,7 @@ def build_multihead_state(
         style=cfg.tech_cost_style,
         base_cost=cfg.base_tech_cost,
         min_cost=cfg.min_tech_cost,
+        cost_factor=getattr(cfg, "tech_cost_factor", 1.0),
     )
     state.turn = 0
     state.actions_this_turn = 0
