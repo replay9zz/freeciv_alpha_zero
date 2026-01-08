@@ -108,6 +108,11 @@ for rule in _RULESET.units:
     UNIT_TECHS[rule.name] = list(rule.req_techs)
     UNIT_OBSOLETE_BY[rule.name] = rule.obsolete_by
 
+MAX_UNIT_ATK = max((spec.atk for spec in UNIT_SPECS.values()), default=1)
+MAX_UNIT_DF = max((spec.df for spec in UNIT_SPECS.values()), default=1)
+MAX_UNIT_HP = max((spec.hp for spec in UNIT_SPECS.values()), default=1)
+MAX_UNIT_MOVES = max((spec.moves for spec in UNIT_SPECS.values()), default=1)
+
 BUILDING_SPECS: Dict[str, BuildingSpec] = {}
 BUILDING_TECHS: Dict[str, List[str]] = {}
 BUILDING_REQ_BUILDINGS: Dict[str, List[str]] = {}
@@ -921,11 +926,7 @@ class MultiheadState:
             if self.research_done[player].get(target, False):
                 self.research_target[player] = None
                 continue
-            cost = TECH_COSTS.get(target, 0.0)
-            if self.tech_costs:
-                cost = self.tech_costs.get(target, cost)
-            if cost <= 0:
-                cost = getattr(self.cfg, "base_tech_cost", 10.0)
+            cost = self._research_cost(player, target)
             if self.research_progress[player] >= cost:
                 self.research_progress[player] -= cost
                 self.research_done[player][target] = True
@@ -934,6 +935,39 @@ class MultiheadState:
                 )
                 self.scores[player] += reward
                 self.research_target[player] = None
+
+    @staticmethod
+    def _normalize_tech_cost_style(style: str) -> str:
+        return ''.join(ch for ch in (style or "").lower() if ch.isalnum())
+
+    @staticmethod
+    def _round_cost(value: float) -> int:
+        if value <= 0:
+            return 0
+        return int(value + 0.5)
+
+    def _techs_researched(self, player: Player) -> int:
+        return sum(1 for done in self.research_done[player].values() if done)
+
+    def _research_cost(self, player: Player, target: str) -> float:
+        style = self._normalize_tech_cost_style(getattr(self.cfg, "tech_cost_style", ""))
+        if style in {"civ1civ2", "civiii"}:
+            techs = max(1, self._techs_researched(player))
+            base = getattr(self.cfg, "base_tech_cost", 10.0) * techs
+            factor = getattr(self.cfg, "tech_cost_factor", 1.0)
+            sciencebox = getattr(self.cfg, "sciencebox", 100)
+            cost = base * factor * (sciencebox / 100.0)
+            min_cost = getattr(self.cfg, "min_tech_cost", 0.0)
+            if min_cost > 0 and cost < min_cost:
+                cost = min_cost
+            return self._round_cost(cost)
+        cost = TECH_COSTS.get(target, 0.0)
+        if self.tech_costs:
+            cost = self.tech_costs.get(target, cost)
+        if cost <= 0:
+            cost = getattr(self.cfg, "base_tech_cost", 10.0)
+        sciencebox = getattr(self.cfg, "sciencebox", 100)
+        return self._round_cost(cost * (sciencebox / 100.0))
 
     def _resolve_terminal(self) -> None:
         alive_me = any(u.alive for u in self.units[1]) or bool(self.cities[1])
@@ -1020,6 +1054,14 @@ class MultiheadState:
         unit_opp = np.zeros_like(channels[0])
         hp_me = np.zeros_like(channels[0])
         hp_opp = np.zeros_like(channels[0])
+        atk_me = np.zeros_like(channels[0])
+        atk_opp = np.zeros_like(channels[0])
+        df_me = np.zeros_like(channels[0])
+        df_opp = np.zeros_like(channels[0])
+        maxhp_me = np.zeros_like(channels[0])
+        maxhp_opp = np.zeros_like(channels[0])
+        moves_me = np.zeros_like(channels[0])
+        moves_opp = np.zeros_like(channels[0])
         fatigue_me = np.zeros_like(channels[0])
         fatigue_opp = np.zeros_like(channels[0])
         city_me = np.zeros_like(channels[0])
@@ -1029,18 +1071,34 @@ class MultiheadState:
         city_walls_me = np.zeros_like(channels[0])
         city_walls_opp = np.zeros_like(channels[0])
         fatigue_turn = self.turn - 1
+        hp_norm = max(1.0, float(MAX_UNIT_HP))
+        atk_norm = max(1.0, float(MAX_UNIT_ATK))
+        df_norm = max(1.0, float(MAX_UNIT_DF))
+        moves_norm = max(1.0, float(MAX_UNIT_MOVES))
         for u in self.units[me]:
             if not u.alive:
                 continue
             unit_me[u.y, u.x] = 1.0
-            hp_me[u.y, u.x] = u.hp / 20.0
+            hp_me[u.y, u.x] = u.hp / hp_norm
+            spec = UNIT_SPECS.get(u.unit_type)
+            if spec is not None:
+                atk_me[u.y, u.x] = spec.atk / atk_norm
+                df_me[u.y, u.x] = spec.df / df_norm
+                maxhp_me[u.y, u.x] = spec.hp / hp_norm
+                moves_me[u.y, u.x] = spec.moves / moves_norm
             if self.turn > 0 and u.last_move_turn == fatigue_turn:
                 fatigue_me[u.y, u.x] = 1.0
         for u in self.units[opp]:
             if not u.alive:
                 continue
             unit_opp[u.y, u.x] = 1.0
-            hp_opp[u.y, u.x] = u.hp / 20.0
+            hp_opp[u.y, u.x] = u.hp / hp_norm
+            spec = UNIT_SPECS.get(u.unit_type)
+            if spec is not None:
+                atk_opp[u.y, u.x] = spec.atk / atk_norm
+                df_opp[u.y, u.x] = spec.df / df_norm
+                maxhp_opp[u.y, u.x] = spec.hp / hp_norm
+                moves_opp[u.y, u.x] = spec.moves / moves_norm
             if self.turn > 0 and u.last_move_turn == fatigue_turn:
                 fatigue_opp[u.y, u.x] = 1.0
         for c in self.cities[me]:
@@ -1061,6 +1119,14 @@ class MultiheadState:
         channels.append(unit_opp)
         channels.append(hp_me)
         channels.append(hp_opp)
+        channels.append(atk_me)
+        channels.append(atk_opp)
+        channels.append(df_me)
+        channels.append(df_opp)
+        channels.append(maxhp_me)
+        channels.append(maxhp_opp)
+        channels.append(moves_me)
+        channels.append(moves_opp)
         channels.append(fatigue_me)
         channels.append(fatigue_opp)
         channels.append(city_me)

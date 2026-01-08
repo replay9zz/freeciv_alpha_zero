@@ -111,11 +111,14 @@ def _collect_prereqs(
     return out
 
 
-def _tech_cost(req_count: int, style: str, base_cost: float) -> float:
+def _tech_cost(num_reqs: int, style: str, base_cost: float) -> float:
     label = (style or "").strip().lower()
-    reqs = max(0, req_count)
+    normalized = ''.join(ch for ch in label if ch.isalnum())
+    if normalized in {"civ1civ2", "civiii"}:
+        return base_cost
+    reqs = max(1, num_reqs)
     if label == "linear":
-        return base_cost * (reqs + 1.0)
+        return base_cost * reqs
     if label in {"classic", "classic+"}:
         return base_cost * (1.0 + reqs) * math.sqrt(1.0 + reqs) / 2.0
     if label in {"experimental", "experimental+"}:
@@ -145,7 +148,7 @@ def build_tech_costs(
     factor = max(0.0, float(cost_factor))
     for tech in RESEARCH_TECHS:
         reqs = _collect_prereqs(tech, prereqs, memo)
-        raw = _tech_cost(len(reqs), style, base_cost)
+        raw = _tech_cost(len(reqs) + 1, style, base_cost)
         costs[tech] = max(min_cost_val, _round_cost(raw * factor))
     return costs
 

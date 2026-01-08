@@ -21,9 +21,10 @@ class MapConfig:
     build_city_reward: float = 0.5
     research_reward: float = 0.05
     tech_cost_style: str = "Linear"
-    base_tech_cost: float = 10.0
-    min_tech_cost: float = 10.0
+    base_tech_cost: float = 2.0
+    min_tech_cost: float = 2.0
     tech_cost_factor: float = 3.0
+    sciencebox: int = 100
     attack_reward: float = 0.0
     score_population: float = 1.0
     score_tech: float = 2.0
