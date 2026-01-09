@@ -8,6 +8,10 @@ from random import shuffle
 
 import numpy as np
 from tqdm import tqdm
+try:
+    from torch.utils.tensorboard import SummaryWriter
+except Exception:  # pragma: no cover - optional dependency
+    SummaryWriter = None
 
 from .Arena import Arena
 from .MCTS import MCTS
@@ -30,6 +34,11 @@ class Coach():
         self.trainExamplesHistory = []  # history of examples from args.numItersForTrainExamplesHistory latest iterations
         self.skipFirstSelfPlay = False  # can be overriden in loadTrainExamples()
         self.stats_path = getattr(self.args, 'stats_path', None)
+        log_dir = getattr(self.args, 'tensorboard_dir', None)
+        if SummaryWriter and log_dir:
+            self.tb_writer = SummaryWriter(log_dir)
+        else:
+            self.tb_writer = None
 
     def executeEpisode(self):
         """
@@ -135,6 +144,8 @@ class Coach():
                 accepted = True
 
             self._log_iteration_stats(i, len(trainExamples), pwins, nwins, draws, accepted)
+        if self.tb_writer:
+            self.tb_writer.close()
 
     def getCheckpointFile(self, iteration):
         return 'checkpoint_' + str(iteration) + '.pth.tar'
@@ -166,16 +177,25 @@ class Coach():
             self.skipFirstSelfPlay = True
 
     def _log_iteration_stats(self, iteration, example_count, pwins, nwins, draws, accepted):
-        if not self.stats_path:
-            return
+        if self.stats_path:
+            folder = os.path.dirname(self.stats_path)
+            if folder and not os.path.exists(folder):
+                os.makedirs(folder, exist_ok=True)
 
-        folder = os.path.dirname(self.stats_path)
-        if folder and not os.path.exists(folder):
-            os.makedirs(folder, exist_ok=True)
+            file_exists = os.path.isfile(self.stats_path)
+            with open(self.stats_path, 'a', newline='') as f:
+                writer = csv.writer(f)
+                if not file_exists:
+                    writer.writerow(['iteration', 'examples', 'prev_wins', 'new_wins', 'draws', 'accepted'])
+                writer.writerow([iteration, example_count, pwins, nwins, draws, int(accepted)])
 
-        file_exists = os.path.isfile(self.stats_path)
-        with open(self.stats_path, 'a', newline='') as f:
-            writer = csv.writer(f)
-            if not file_exists:
-                writer.writerow(['iteration', 'examples', 'prev_wins', 'new_wins', 'draws', 'accepted'])
-            writer.writerow([iteration, example_count, pwins, nwins, draws, int(accepted)])
+        if self.tb_writer:
+            self.tb_writer.add_scalar("train/examples", example_count, iteration)
+            self.tb_writer.add_scalar("arena/prev_wins", pwins, iteration)
+            self.tb_writer.add_scalar("arena/new_wins", nwins, iteration)
+            self.tb_writer.add_scalar("arena/draws", draws, iteration)
+            total = pwins + nwins + draws
+            if total > 0:
+                self.tb_writer.add_scalar("arena/new_win_rate", nwins / total, iteration)
+            self.tb_writer.add_scalar("arena/accepted", int(accepted), iteration)
+            self.tb_writer.flush()

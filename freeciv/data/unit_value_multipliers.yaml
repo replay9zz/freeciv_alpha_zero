@@ -1,7 +1,7 @@
 # Optional per-unit multipliers for unlock-derived research rewards.
 # Name must match the "name" field in tech_unlocks.yaml entries.
 # Example: down-weight situational units.
-Migrants: 0.1
-Diplomat: 0.1
-Archers: 1.5
-Settler: 0.1
+# Migrants: 0.1
+# Diplomat: 0.1
+# Archers: 1.5
+# Settler: 0.1

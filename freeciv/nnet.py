@@ -18,6 +18,11 @@ except ModuleNotFoundError:  # pragma: no cover
     from ..utils import AverageMeter, dotdict
     from ..pytorch.NNet import FreecivNNet
 
+try:
+    from torch.utils.tensorboard import SummaryWriter
+except Exception:  # pragma: no cover - optional dependency
+    SummaryWriter = None
+
 from .game import CanonicalBoard
 
 force_cpu = os.environ.get("FREECIV_FORCE_CPU", "").strip()
@@ -33,11 +38,16 @@ nnet_args = dotdict({
 
 
 class NNetWrapper(NeuralNet):
-    def __init__(self, game):
+    def __init__(self, game, log_dir: str | None = None):
         self.game = game
         self.nnet = FreecivNNet(game, nnet_args)
         self.channels, self.board_h, self.board_w = game.getBoardSize()
         self.action_size = game.getActionSize()
+        self._train_step = 0
+        if SummaryWriter and log_dir:
+            self._writer = SummaryWriter(log_dir)
+        else:
+            self._writer = None
         if nnet_args.cuda:
             self.nnet.cuda()
             print("[nnet] Using CUDA")
@@ -80,6 +90,15 @@ class NNetWrapper(NeuralNet):
                 pi_losses.update(l_pi.item(), boards_t.size(0))
                 v_losses.update(l_v.item(), boards_t.size(0))
                 iterator.set_postfix(pi=pi_losses.avg, v=v_losses.avg)
+                if self._writer:
+                    self._writer.add_scalar("loss/pi_batch", l_pi.item(), self._train_step)
+                    self._writer.add_scalar("loss/v_batch", l_v.item(), self._train_step)
+                    self._writer.add_scalar("loss/total_batch", total_loss.item(), self._train_step)
+                self._train_step += 1
+            if self._writer:
+                self._writer.add_scalar("loss/pi_epoch", pi_losses.avg, epoch)
+                self._writer.add_scalar("loss/v_epoch", v_losses.avg, epoch)
+                self._writer.flush()
 
     def predict(self, board):
         self.nnet.eval()

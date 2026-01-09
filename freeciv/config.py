@@ -47,6 +47,7 @@ class MapConfig:
     tax_science_rate: float = 0.6
     research_rate_multiplier: float = 1.0
     production_rate_multiplier: float = 1.0
+    production_queue_max: int = 3
     food_consumption: int = 2
     food_growth: int = 20
     city_unit_cap: int = 6

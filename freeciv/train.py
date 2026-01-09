@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import argparse
+import datetime
 import time
 import logging
 from pathlib import Path
@@ -180,7 +181,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument('--num-eps', type=int, default=10, help='Self-play episodes per iteration')
     parser.add_argument('--num-mcts-sims', type=int, default=64)
     parser.add_argument('--arena-compare', type=int, default=10)
-    parser.add_argument('--checkpoint', default='temp/fcaz', help='Directory for checkpoints')
+    parser.add_argument('--checkpoint', default=None, help='Directory for checkpoints (default: results/freeciv_alpha_zero/DATE)')
     parser.add_argument('--load-model', action='store_true')
     parser.add_argument('--load-folder', default=None)
     parser.add_argument('--load-file', default=None)
@@ -188,6 +189,12 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument('--mode', choices=['default', 'combat', 'multihead'], default='default', help='Training environment')
     parser.add_argument('--max-units', type=int, default=4, help='Max units per side for multihead mode')
     return parser.parse_args()
+
+
+def _default_checkpoint_dir() -> Path:
+    base_dir = Path(__file__).resolve().parents[1]
+    stamp = datetime.datetime.now().strftime("%Y-%m-%d--%H-%M-%S")
+    return base_dir / "results" / "freeciv_alpha_zero" / stamp
 
 def format_duration(seconds: float) -> str:
     days, rem = divmod(float(seconds), 86400)
@@ -198,6 +205,9 @@ def format_duration(seconds: float) -> str:
 def main():
     start_time = time.perf_counter()
     args = parse_args()
+    if not args.checkpoint:
+        args.checkpoint = str(_default_checkpoint_dir())
+    args.tensorboard_dir = args.checkpoint
     logging.info("Starting training with args: %s", args)
     map_cfg = MapConfig(map_w=args.map_width, map_h=args.map_height, max_turns=args.max_turns)
     # Build research rewards from civ2civ3 ruleset unlock values.
@@ -230,7 +240,7 @@ def main():
     else:
         game = FreecivGame(map_cfg, provider)
         logging.info("Using default training mode.")
-    nnet = NNetWrapper(game)
+    nnet = NNetWrapper(game, log_dir=args.tensorboard_dir)
 
     train_cfg = TrainingConfig()
     coach_args = dotdict({
@@ -247,6 +257,7 @@ def main():
         'load_folder_file': (args.load_folder, args.load_file) if args.load_folder and args.load_file else None,
         'numItersForTrainExamplesHistory': 4,
         'stats_path': args.stats_path,
+        'tensorboard_dir': args.tensorboard_dir,
     })
 
     coach = Coach(game, nnet, coach_args)
@@ -258,6 +269,7 @@ def main():
         coach.loadTrainExamples()
 
     coach.learn()
+    nnet.save_checkpoint(folder=args.checkpoint, filename="model.checkpoint")
     elapsed = time.perf_counter() - start_time
     print(f"Total runtime: {format_duration(elapsed)}")
 

@@ -59,6 +59,7 @@ class City:
     production_kind: Optional[str] = None  # "unit" or "building"
     production_target: Optional[str] = None
     production_progress: float = 0.0
+    production_queue: list[tuple[str, str]] = field(default_factory=list)
     has_city_walls: bool = False
     buildings: set[str] = field(default_factory=set)
 
@@ -107,6 +108,38 @@ for rule in _RULESET.units:
     )
     UNIT_TECHS[rule.name] = list(rule.req_techs)
     UNIT_OBSOLETE_BY[rule.name] = rule.obsolete_by
+
+UNIT_GENERATION_CHAINS: Tuple[Tuple[str, ...], ...] = (
+    (
+        "Warriors",
+        "Phalanx",
+        "Pikemen",
+        "Musketeers",
+        "Riflemen",
+        "Alpine Troops",
+        "Mech. Inf.",
+    ),
+    (
+        "Warriors",
+        "Legion",
+        "Archers",
+        "Musketeers",
+        "Riflemen",
+        "Alpine Troops",
+        "Mech. Inf.",
+    ),
+    ("Catapult", "Cannon", "Artillery", "Howitzer"),
+    ("Horsemen", "Chariot", "Knights", "Dragoons", "Cavalry", "Armor"),
+    (
+        "Horsemen",
+        "Elephants",
+        "Crusaders",
+        "Knights",
+        "Dragoons",
+        "Cavalry",
+        "Armor",
+    ),
+)
 
 MAX_UNIT_ATK = max((spec.atk for spec in UNIT_SPECS.values()), default=1)
 MAX_UNIT_DF = max((spec.df for spec in UNIT_SPECS.values()), default=1)
@@ -400,6 +433,7 @@ class MultiheadState:
                     production_kind=c.production_kind,
                     production_target=c.production_target,
                     production_progress=c.production_progress,
+                    production_queue=list(c.production_queue),
                     has_city_walls=c.has_city_walls,
                     buildings=set(c.buildings),
                 )
@@ -509,9 +543,13 @@ class MultiheadState:
         prod_offset = offset + self.ECON_PRODUCTION_OFFSET
         for city_idx in range(min(len(self.cities[player]), self.max_cities)):
             city = self.cities[player][city_idx]
+            queue_limit = getattr(self.cfg, "production_queue_max", 0)
+            if city.production_target and queue_limit > 0:
+                if len(city.production_queue) >= queue_limit:
+                    continue
             for item_idx, (kind, name) in enumerate(PRODUCTION_ITEM_NAMES):
                 if kind == "unit":
-                    if name == "Settlers" and city.size <= 1:
+                    if name == "Settlers" and city.size <= 3:
                         continue
                     if self._city_unit_count(player, city_idx) >= self.cfg.city_unit_cap:
                         continue
@@ -525,6 +563,26 @@ class MultiheadState:
                 moves[
                     prod_offset + city_idx * self.PRODUCTION_ITEM_COUNT + item_idx
                 ] = 1
+        if self._player_has_worker_like(player):
+            for city_idx in range(min(len(self.cities[player]), self.max_cities)):
+                start = prod_offset + city_idx * self.PRODUCTION_ITEM_COUNT
+                end = min(start + self.PRODUCTION_ITEM_COUNT, len(moves))
+                if start >= len(moves) or not moves[start:end].any():
+                    continue
+                worker_actions = []
+                other_actions = []
+                for item_idx in range(self.PRODUCTION_ITEM_COUNT):
+                    action_idx = start + item_idx
+                    if action_idx >= len(moves) or not moves[action_idx]:
+                        continue
+                    kind, name = PRODUCTION_ITEM_NAMES[item_idx]
+                    if kind == "unit" and self._unit_is_worker_like(name):
+                        worker_actions.append(action_idx)
+                    else:
+                        other_actions.append(action_idx)
+                if other_actions and worker_actions:
+                    for action_idx in worker_actions:
+                        moves[action_idx] = 0
         # pass always valid
         moves[self.PASS_ACTION] = 1
         return moves
@@ -585,21 +643,18 @@ class MultiheadState:
                 if city_slot < len(self.cities[player]):
                     city = self.cities[player][city_slot]
                     kind, name = PRODUCTION_ITEM_NAMES[item_idx]
-                    if kind == "unit":
-                        if self._unit_unlocked(player, name):
-                            if (
-                                city.production_kind != "unit"
-                                or city.production_target != name
-                            ):
+                    queue_limit = getattr(self.cfg, "production_queue_max", 0)
+                    if city.production_target:
+                        if queue_limit <= 0 or len(city.production_queue) < queue_limit:
+                            city.production_queue.append((kind, name))
+                    else:
+                        if kind == "unit":
+                            if self._unit_unlocked(player, name):
                                 city.production_kind = "unit"
                                 city.production_target = name
                                 city.production_progress = 0.0
-                    else:
-                        if self._building_unlocked(player, city, name):
-                            if (
-                                city.production_kind != "building"
-                                or city.production_target != name
-                            ):
+                        else:
+                            if self._building_unlocked(player, city, name):
                                 city.production_kind = "building"
                                 city.production_target = name
                                 city.production_progress = 0.0
@@ -739,17 +794,96 @@ class MultiheadState:
             return True
         return all(self.research_done[player].get(tech, False) for tech in techs)
 
+    def _unit_strength_score(self, spec: UnitSpec) -> int:
+        return (
+            spec.atk * 100
+            + spec.df * 90
+            + spec.hp * 10
+            + spec.firepower * 50
+            + spec.moves * 20
+        )
+
     def _unit_is_obsolete_exempt(self, unit_name: str) -> bool:
         label = (unit_name or "").lower()
         return any(tag in label for tag in ("settler", "worker", "engineer", "migrant"))
 
+    def _unit_is_worker_like(self, unit_name: str) -> bool:
+        label = (unit_name or "").lower()
+        return any(tag in label for tag in ("worker", "engineer", "migrant"))
+
+    def _player_has_worker_like(self, player: Player) -> bool:
+        return any(
+            u.alive and self._unit_is_worker_like(u.unit_type) for u in self.units[player]
+        )
+
+    def _best_unlocked_in_chain(
+        self, player: Player, chain: Tuple[str, ...]
+    ) -> Optional[str]:
+        best = None
+        for name in chain:
+            if name in UNIT_SPECS and self._unit_unlocked(player, name):
+                best = name
+        return best
+
+    def _unit_best_upgrade(self, player: Player, unit_name: str) -> str:
+        candidates: list[str] = []
+        for chain in UNIT_GENERATION_CHAINS:
+            if unit_name not in chain:
+                continue
+            best = self._best_unlocked_in_chain(player, chain)
+            if best:
+                candidates.append(best)
+        if not candidates:
+            return unit_name
+
+        def score(name: str) -> int:
+            spec = UNIT_SPECS.get(name)
+            if spec is None:
+                return -1
+            return self._unit_strength_score(spec)
+
+        return max(candidates, key=score)
+
     def _unit_obsolete(self, player: Player, unit_name: str) -> bool:
         if self._unit_is_obsolete_exempt(unit_name):
             return False
+        if self._unit_best_upgrade(player, unit_name) != unit_name:
+            return True
         obsolete_by = UNIT_OBSOLETE_BY.get(unit_name)
         if not obsolete_by:
             return False
         return self._unit_unlocked(player, obsolete_by)
+
+    def _upgrade_unit_name(self, player: Player, unit_name: str) -> str:
+        upgraded = self._unit_best_upgrade(player, unit_name)
+        if upgraded != unit_name:
+            return upgraded
+        seen = {unit_name}
+        while True:
+            obsolete_by = UNIT_OBSOLETE_BY.get(unit_name)
+            if not obsolete_by or obsolete_by in seen:
+                break
+            if not self._unit_unlocked(player, obsolete_by):
+                break
+            unit_name = obsolete_by
+            seen.add(unit_name)
+        return unit_name
+
+    def _refresh_production_queue(self, player: Player) -> None:
+        for city in self.cities[player]:
+            if not city.production_queue:
+                continue
+            updated: list[tuple[str, str]] = []
+            changed = False
+            for kind, name in city.production_queue:
+                if kind == "unit":
+                    upgraded = self._upgrade_unit_name(player, name)
+                    if upgraded != name:
+                        name = upgraded
+                        changed = True
+                updated.append((kind, name))
+            if changed:
+                city.production_queue = updated
 
     def _building_is_palace(self, building_name: str) -> bool:
         return "palace" in (building_name or "").lower()
@@ -760,6 +894,9 @@ class MultiheadState:
         if self._building_is_palace(building_name):
             return False
         if building_name in city.buildings:
+            return False
+        lowered = (building_name or "").lower()
+        if lowered.startswith("aqueduct") and ("river" in lowered or "lake" in lowered):
             return False
         techs = BUILDING_TECHS.get(building_name, [])
         if techs and not all(
@@ -868,6 +1005,10 @@ class MultiheadState:
         for player in (1, -1):
             for city_idx, city in enumerate(self.cities[player]):
                 size = max(1, city.size)
+                if city.production_target is None and city.production_queue:
+                    kind, name = city.production_queue.pop(0)
+                    city.production_kind = kind
+                    city.production_target = name
                 total_food = self.cfg.city_food + self.cfg.grass_food * size
                 total_shields = (
                     self.cfg.city_shield + self.cfg.grass_shield * size
@@ -897,6 +1038,12 @@ class MultiheadState:
                             player, city_idx, city.production_target
                         ):
                             city.production_progress -= spec.cost
+                            if city.production_target == "Settlers":
+                                city.size = max(1, city.size - 2)
+                            if city.production_queue:
+                                kind, name = city.production_queue.pop(0)
+                                city.production_kind = kind
+                                city.production_target = name
                 elif city.production_target and city.production_kind == "building":
                     spec = BUILDING_SPECS.get(city.production_target)
                     if (
@@ -908,8 +1055,13 @@ class MultiheadState:
                         if city.production_target == "City Walls":
                             city.has_city_walls = True
                         city.production_progress -= spec.cost
-                        city.production_kind = None
-                        city.production_target = None
+                        if city.production_queue:
+                            kind, name = city.production_queue.pop(0)
+                            city.production_kind = kind
+                            city.production_target = name
+                        else:
+                            city.production_kind = None
+                            city.production_target = None
 
                 # Research bulbs are added from trade; completion handled below.
         self._apply_research_bulbs(bulbs_by_player)
@@ -934,6 +1086,7 @@ class MultiheadState:
                     target, self.cfg.research_reward
                 )
                 self.scores[player] += reward
+                self._refresh_production_queue(player)
                 self.research_target[player] = None
 
     @staticmethod
