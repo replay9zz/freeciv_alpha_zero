@@ -424,6 +424,7 @@ def build_multihead_state(
     unit_positions: List[Tuple[int, int]],
     unit_can_build_city: List[bool],
     max_units: int,
+    unit_type_names: Optional[List[str]] = None,
 ) -> MultiheadState:
     """
     Best-effort adapter from live Snapshot -> MultiheadState for inference.
@@ -455,15 +456,22 @@ def build_multihead_state(
     state.terminal_reason = None
     state.scores = {1: 0.0, -1: 0.0}
     state.acted_unit_slots = {1: set(), -1: set()}
+    state.acted_production_cities = {1: set(), -1: set()}
 
     state.RESEARCH_TECHS = MultiheadState.RESEARCH_TECHS
     state.MOVE_PER_UNIT = MultiheadState.MOVE_PER_UNIT
     state.ATTACK_PER_UNIT = MultiheadState.ATTACK_PER_UNIT
 
     # Friendly unit slots.
-    for (x, y), can_build in zip(unit_positions[:max_units], unit_can_build_city[:max_units]):
+    for idx, ((x, y), can_build) in enumerate(
+        zip(unit_positions[:max_units], unit_can_build_city[:max_units])
+    ):
+        label = ""
+        if unit_type_names is not None and idx < len(unit_type_names):
+            label = unit_type_names[idx] or ""
+        unit_label = label or ("Settlers" if can_build else "Warriors")
         state.units[1].append(
-            MHUnit(int(x), int(y), 10, 2, 1, 1, "Settlers", True, bool(can_build), None)
+            MHUnit(int(x), int(y), 10, 2, 1, 1, unit_label, True, bool(can_build), None)
         )
     while len(state.units[1]) < max_units:
         state.units[1].append(
@@ -738,6 +746,17 @@ def run_multihead_agent(
         """
         reqs = TECH_PREREQS.get(tech_name, [])
         return all(flags.get(req, False) for req in reqs)
+
+    def _unit_label(uid: int) -> str:
+        label = unit_type_labels.get(uid, "") or ""
+        if not label:
+            try:
+                label = get_unit_rule_name(client, uid) or ""
+            except Exception:
+                label = ""
+            if label:
+                unit_type_labels[uid] = label
+        return label
     while steps < args.max_steps and turns < map_cfg.max_turns:
         controlled_units, player_id = discover_controlled_units(client, player_id)
         controlled_units = sorted(controlled_units)
@@ -810,12 +829,17 @@ def run_multihead_agent(
 
         # Gather current positions for all controlled units.
         unit_positions: List[Tuple[int, int]] = []
+        unit_type_names: List[str] = []
+        unit_can_build_city: List[bool] = []
         for uid in controlled_units:
             pos_result = client.eval(simple_find_unit_pos(uid))
             pos_info = parse_position_result(pos_result)
             if pos_info is None:
                 continue
             unit_positions.append((pos_info[0], pos_info[1]))
+            label = _unit_label(uid)
+            unit_type_names.append(label)
+            unit_can_build_city.append("settler" in label.lower())
 
         # If an owned city is threatened (enemy within 2 tiles) and not garrisoned,
         # pull units back to that city for defense.
@@ -862,15 +886,22 @@ def run_multihead_agent(
                         controlled_units, player_id = discover_controlled_units(client, player_id)
                         controlled_units = sorted(controlled_units)
                         unit_positions = []
+                        unit_type_names = []
+                        unit_can_build_city = []
                         break
                     visited_tiles.add(snapshot.player_pos)
                     unit_positions = []
+                    unit_type_names = []
+                    unit_can_build_city = []
                     for uid in controlled_units:
                         pos_result = client.eval(simple_find_unit_pos(uid))
                         pos_info = parse_position_result(pos_result)
                         if pos_info is None:
                             continue
                         unit_positions.append((pos_info[0], pos_info[1]))
+                        label = _unit_label(uid)
+                        unit_type_names.append(label)
+                        unit_can_build_city.append("settler" in label.lower())
                     enemy_coords = [(int(x), int(y)) for (y, x) in np.argwhere(snapshot.enemy_map)]
                     break
             else:
@@ -885,9 +916,6 @@ def run_multihead_agent(
 
         # Execute up to K actions, then end turn.
         for _ in range(max(1, args.max_units * 2)):
-            unit_can_build_city = [
-                ("settler" in (unit_type_labels.get(uid, "") or "").lower()) for uid in controlled_units
-            ]
             # Identify a target to focus movement/attacks: first known enemy tile (unit or city).
             target_coord: Optional[Tuple[int, int]] = None
             # Prefer explicit enemy tiles from vision status (covers cities even if enemy_map missed it).
@@ -914,6 +942,7 @@ def run_multihead_agent(
                 snapshot,
                 unit_positions,
                 unit_can_build_city=unit_can_build_city,
+                unit_type_names=unit_type_names,
                 max_units=args.max_units,
             )
             canonical = game.getCanonicalForm(board_state, 1)
@@ -1088,12 +1117,17 @@ def run_multihead_agent(
                 if isinstance(snapshot.research_name, str) and snapshot.research_name.startswith("__TECH__"):
                     current_research = snapshot.research_name.replace("__TECH__", "", 1).strip() or None
                 unit_positions = []
+                unit_type_names = []
+                unit_can_build_city = []
                 for uid in controlled_units:
                     pos_result = client.eval(simple_find_unit_pos(uid))
                     pos_info = parse_position_result(pos_result)
                     if pos_info is None:
                         continue
                     unit_positions.append((pos_info[0], pos_info[1]))
+                    label = _unit_label(uid)
+                    unit_type_names.append(label)
+                    unit_can_build_city.append("settler" in label.lower())
                 time.sleep(args.sleep)
                 continue
 
@@ -1152,12 +1186,17 @@ def run_multihead_agent(
             if isinstance(snapshot.research_name, str) and snapshot.research_name.startswith("__TECH__"):
                 current_research = snapshot.research_name.replace("__TECH__", "", 1).strip() or None
             unit_positions = []
+            unit_type_names = []
+            unit_can_build_city = []
             for uid in controlled_units:
                 pos_result = client.eval(simple_find_unit_pos(uid))
                 pos_info = parse_position_result(pos_result)
                 if pos_info is None:
                     continue
                 unit_positions.append((pos_info[0], pos_info[1]))
+                label = _unit_label(uid)
+                unit_type_names.append(label)
+                unit_can_build_city.append("settler" in label.lower())
             time.sleep(args.sleep)
 
         client.end_turn()

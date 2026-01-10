@@ -55,11 +55,14 @@ class Coach():
             trainExamples: a list of examples of the form (canonicalBoard, currPlayer, pi,v)
                            pi is the MCTS informed policy vector, v is +1 if
                            the player eventually won the game, else -1.
+            stats: dict with total_reward, player_rewards, episode_length
         """
         trainExamples = []
         board = self.game.getInitBoard()
         self.curPlayer = 1
         episodeStep = 0
+        total_reward = 0.0
+        player_rewards = {1: 0.0, -1: 0.0}
 
         while True:
             episodeStep += 1
@@ -72,12 +75,27 @@ class Coach():
                 trainExamples.append([b, self.curPlayer, p, None])
 
             action = np.random.choice(len(pi), p=pi)
+            prev_scores = dict(board.scores) if hasattr(board, "scores") else None
+            acting_player = self.curPlayer
             board, self.curPlayer = self.game.getNextState(board, self.curPlayer, action)
+            if prev_scores is not None and hasattr(board, "scores"):
+                delta = board.scores.get(acting_player, 0.0) - prev_scores.get(acting_player, 0.0)
+                player_rewards[acting_player] += float(delta)
+                total_reward += float(delta)
 
             r = self.game.getGameEnded(board, self.curPlayer)
 
             if r != 0:
-                return [(x[0], x[2], r * ((-1) ** (x[1] != self.curPlayer))) for x in trainExamples]
+                stats = {
+                    "total_reward": total_reward,
+                    "player_rewards": player_rewards,
+                    "episode_length": episodeStep,
+                }
+                examples = [
+                    (x[0], x[2], r * ((-1) ** (x[1] != self.curPlayer)))
+                    for x in trainExamples
+                ]
+                return examples, stats
 
     def learn(self):
         """
@@ -95,10 +113,29 @@ class Coach():
             if not self.skipFirstSelfPlay or i > 1:
                 iterationTrainExamples = deque([], maxlen=self.args.maxlenOfQueue)
                 log.info("Starting self-play episodes (%d)", self.args.numEps)
+                total_rewards = []
+                player1_rewards = []
+                player2_rewards = []
+                episode_lengths = []
                 for _ in tqdm(range(self.args.numEps), desc="Self Play"):
                     self.mcts = MCTS(self.game, self.nnet, self.args)  # reset search tree
-                    iterationTrainExamples += self.executeEpisode()
+                    examples, stats = self.executeEpisode()
+                    iterationTrainExamples += examples
+                    total_rewards.append(stats["total_reward"])
+                    player1_rewards.append(stats["player_rewards"].get(1, 0.0))
+                    player2_rewards.append(stats["player_rewards"].get(-1, 0.0))
+                    episode_lengths.append(stats["episode_length"])
                 log.info("Finished self-play; examples collected: %d", len(iterationTrainExamples))
+                if self.tb_writer and total_rewards:
+                    mean_total = float(np.mean(total_rewards))
+                    mean_len = float(np.mean(episode_lengths))
+                    mean_p1 = float(np.mean(player1_rewards))
+                    mean_p2 = float(np.mean(player2_rewards))
+                    self.tb_writer.add_scalar("1.Total_reward/1.Total_reward", mean_total, i)
+                    self.tb_writer.add_scalar("1.Total_reward/3.Episode_length", mean_len, i)
+                    self.tb_writer.add_scalar("1.Total_reward/4.Player1_reward", mean_p1, i)
+                    self.tb_writer.add_scalar("1.Total_reward/5.Player2_reward", mean_p2, i)
+                    self.tb_writer.flush()
 
                 # save the iteration examples to the history 
                 self.trainExamplesHistory.append(iterationTrainExamples)

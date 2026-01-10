@@ -176,7 +176,9 @@ def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="AlphaZero training harness for Freeciv board abstraction")
     parser.add_argument('--map-width', type=int, default=9)
     parser.add_argument('--map-height', type=int, default=9)
-    parser.add_argument('--max-turns', type=int, default=64)
+    parser.add_argument('--max-turns', type=int, default=64, help='Max steps per episode (alias: --max-moves)')
+    parser.add_argument('--max-steps', type=int, default=None, help='Alias for --max-turns')
+    parser.add_argument('--max-moves', type=int, default=None, help='Alias for --max-turns')
     parser.add_argument('--num-iters', type=int, default=2)
     parser.add_argument('--num-eps', type=int, default=10, help='Self-play episodes per iteration')
     parser.add_argument('--num-mcts-sims', type=int, default=64)
@@ -186,8 +188,8 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument('--load-folder', default=None)
     parser.add_argument('--load-file', default=None)
     parser.add_argument('--stats-path', default=None)
-    parser.add_argument('--mode', choices=['default', 'combat', 'multihead'], default='default', help='Training environment')
-    parser.add_argument('--max-units', type=int, default=4, help='Max units per side for multihead mode')
+    parser.add_argument('--mode', choices=['default', 'combat', 'multihead'], default='multihead', help='Training environment')
+    parser.add_argument('--max-units', type=int, default=6, help='Max units per side for multihead mode')
     return parser.parse_args()
 
 
@@ -205,6 +207,10 @@ def format_duration(seconds: float) -> str:
 def main():
     start_time = time.perf_counter()
     args = parse_args()
+    if args.max_steps is not None:
+        args.max_turns = args.max_steps
+    if args.max_moves is not None:
+        args.max_turns = args.max_moves
     if not args.checkpoint:
         args.checkpoint = str(_default_checkpoint_dir())
     args.tensorboard_dir = args.checkpoint

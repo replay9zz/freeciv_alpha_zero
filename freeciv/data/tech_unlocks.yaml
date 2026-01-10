@@ -1,19 +1,31 @@
-# Tier 0
+# Auto-generated from freeciv/data/minimal/{units,buildings}.ruleset
 - tech: None
   unlocks:
     - kind: unit
-      name: Settlers
+      name: "Settlers"
       attack: 0
       defense: 1
       hp: 20
       firepower: 1
       moves: 1
       cost: 30
+      pop_cost: 2
       upkeep:
         food: 1
-      pop_cost: 2
     - kind: unit
-      name: Workers
+      name: "Warriors"
+      attack: 1
+      defense: 1
+      hp: 10
+      firepower: 1
+      moves: 1
+      cost: 10
+      upkeep:
+        food: 1
+        shields: 1
+        gold: 1
+    - kind: unit
+      name: "Workers"
       attack: 0
       defense: 1
       hp: 10
@@ -23,137 +35,1127 @@
       upkeep:
         shields: 1
         gold: 1
-    - kind: unit
-      name: Warriors
-      attack: 1
-      defense: 1
-      hp: 10
-      firepower: 1
-      moves: 1
-      cost: 10
-    - kind: unit
-      name: Explorer
-      attack: 0
-      defense: 1
-      hp: 10
-      firepower: 1
-      moves: 1
-      vision_radius_sq: 6
-      cost: 30
     - kind: building
-      name: Barracks
+      name: "Aqueduct, Lake"
+      cost: 20
+      upkeep: 0
+    - kind: building
+      name: "Aqueduct, River"
+      cost: 20
+      upkeep: 0
+    - kind: building
+      name: "Barracks"
       cost: 30
       upkeep: 1
     - kind: building
-      name: Palace
+      name: "Coinage"
+      cost: 999
+      upkeep: 0
+    - kind: building
+      name: "Palace"
       cost: 70
       upkeep: 0
 
-# Tier 1
-- tech: Alphabet
+- tech: "Advanced Flight"
   unlocks:
     - kind: unit
-      name: Diplomat
+      name: "AWACS"
+      attack: 0
+      defense: 1
+      hp: 20
+      firepower: 1
+      moves: 16
+      cost: 140
+      upkeep:
+        shields: 1
+        gold: 1
+    - kind: unit
+      name: "Bomber"
+      attack: 6
+      defense: 2
+      hp: 30
+      firepower: 1
+      moves: 8
+      cost: 100
+      upkeep:
+        food: 1
+        shields: 1
+        gold: 1
+    - kind: unit
+      name: "Carrier"
+      attack: 0
+      defense: 9
+      hp: 40
+      firepower: 1
+      moves: 5
+      cost: 150
+      upkeep:
+        food: 1
+        shields: 1
+        gold: 1
+
+- tech: "Alphabet"
+  unlocks:
+    - kind: unit
+      name: "Diplomat"
       attack: 0
       defense: 0
       hp: 10
       firepower: 1
       moves: 2
       cost: 30
+      upkeep:
+        shields: 1
+        gold: 1
 
-- tech: Pottery
+- tech: "Amphibious Warfare"
   unlocks:
     - kind: unit
-      name: Migrants
-      attack: 0
-      defense: 1
+      name: "Marines"
+      attack: 8
+      defense: 5
       hp: 20
       firepower: 1
       moves: 1
-      cost: 10
+      cost: 60
       upkeep:
         food: 1
-      pop_cost: 1
+        shields: 1
+        gold: 1
     - kind: building
-      name: Granary
-      cost: 40
+      name: "Port Facility"
+      cost: 60
+      upkeep: 2
+
+- tech: "Astronomy"
+  unlocks:
+    - kind: building
+      name: "Copernicus' Observatory"
+      cost: 300
+      upkeep: 0
+
+- tech: "Automobile"
+  unlocks:
+    - kind: building
+      name: "Super Highways"
+      cost: 120
+      upkeep: 3
+
+- tech: "Banking"
+  unlocks:
+    - kind: building
+      name: "Bank"
+      cost: 80
       upkeep: 1
 
-- tech: Bronze Working
+- tech: "Bronze Working"
   unlocks:
     - kind: unit
-      name: Phalanx
+      name: "Phalanx"
       attack: 1
       defense: 2
       hp: 10
       firepower: 1
       moves: 1
       cost: 20
+      upkeep:
+        food: 1
+        shields: 1
+        gold: 1
+    - kind: building
+      name: "Colossus"
+      cost: 200
+      upkeep: 0
 
-- tech: Warrior Code
+- tech: "Ceremonial Burial"
+  unlocks:
+    - kind: building
+      name: "Mausoleum of Mausolos"
+      cost: 200
+      upkeep: 0
+    - kind: building
+      name: "Temple"
+      cost: 30
+      upkeep: 1
+
+- tech: "Chivalry"
   unlocks:
     - kind: unit
-      name: Archers
-      attack: 3
-      defense: 1
+      name: "Knights"
+      attack: 4
+      defense: 3
+      hp: 10
+      firepower: 1
+      moves: 2
+      cost: 40
+      upkeep:
+        food: 1
+        shields: 1
+        gold: 1
+    - kind: building
+      name: "King Richard's Crusade"
+      cost: 300
+      upkeep: 0
+
+- tech: "Code of Laws"
+  unlocks:
+    - kind: building
+      name: "Courthouse"
+      cost: 60
+      upkeep: 1
+
+- tech: "Combined Arms"
+  unlocks:
+    - kind: unit
+      name: "Helicopter"
+      attack: 5
+      defense: 3
+      hp: 30
+      firepower: 1
+      moves: 6
+      cost: 70
+      upkeep:
+        food: 1
+        shields: 1
+        gold: 1
+    - kind: unit
+      name: "Paratroopers"
+      attack: 6
+      defense: 4
+      hp: 20
+      firepower: 1
+      moves: 1
+      cost: 60
+      upkeep:
+        food: 1
+        shields: 1
+        gold: 1
+
+- tech: "Combustion"
+  unlocks:
+    - kind: unit
+      name: "Submarine"
+      attack: 12
+      defense: 5
+      hp: 20
+      firepower: 1
+      moves: 5
+      cost: 70
+      upkeep:
+        food: 1
+        shields: 1
+        gold: 1
+
+- tech: "Communism"
+  unlocks:
+    - kind: building
+      name: "Police Station"
+      cost: 50
+      upkeep: 2
+    - kind: building
+      name: "United Nations"
+      cost: 600
+      upkeep: 0
+
+- tech: "Computers"
+  unlocks:
+    - kind: building
+      name: "Internet"
+      cost: 600
+      upkeep: 0
+    - kind: building
+      name: "Research Lab"
+      cost: 120
+      upkeep: 3
+
+- tech: "Conscription"
+  unlocks:
+    - kind: unit
+      name: "Riflemen"
+      attack: 5
+      defense: 4
+      hp: 20
+      firepower: 1
+      moves: 1
+      cost: 50
+      upkeep:
+        food: 1
+        shields: 1
+        gold: 1
+    - kind: building
+      name: "Women's Suffrage"
+      cost: 600
+      upkeep: 0
+
+- tech: "Construction"
+  unlocks:
+    - kind: building
+      name: "Amphitheater"
+      cost: 70
+      upkeep: 3
+    - kind: building
+      name: "Aqueduct"
+      cost: 60
+      upkeep: 1
+    - kind: building
+      name: "Great Wall"
+      cost: 300
+      upkeep: 0
+
+- tech: "Currency"
+  unlocks:
+    - kind: building
+      name: "Marketplace"
+      cost: 60
+      upkeep: 0
+
+- tech: "Democracy"
+  unlocks:
+    - kind: building
+      name: "Statue of Liberty"
+      cost: 400
+      upkeep: 0
+
+- tech: "Economics"
+  unlocks:
+    - kind: building
+      name: "A.Smith's Trading Co."
+      cost: 400
+      upkeep: 0
+    - kind: building
+      name: "Stock Exchange"
+      cost: 120
+      upkeep: 2
+
+- tech: "Electronics"
+  unlocks:
+    - kind: building
+      name: "Hoover Dam"
+      cost: 600
+      upkeep: 0
+    - kind: building
+      name: "Hydro Plant"
+      cost: 180
+      upkeep: 4
+
+- tech: "Engineering"
+  unlocks:
+    - kind: unit
+      name: "Destroyer"
+      attack: 4
+      defense: 4
+      hp: 30
+      firepower: 1
+      moves: 6
+      cost: 60
+      upkeep:
+        food: 1
+        shields: 1
+        gold: 1
+    - kind: unit
+      name: "Transport"
+      attack: 0
+      defense: 3
+      hp: 30
+      firepower: 1
+      moves: 5
+      cost: 50
+      upkeep:
+        food: 1
+        shields: 1
+        gold: 1
+
+- tech: "Environmentalism"
+  unlocks:
+    - kind: building
+      name: "Solar Plant"
+      cost: 320
+      upkeep: 4
+    - kind: building
+      name: "Space Module"
+      cost: 600
+      upkeep: 0
+
+- tech: "Espionage"
+  unlocks:
+    - kind: unit
+      name: "Spy"
+      attack: 0
+      defense: 0
+      hp: 10
+      firepower: 1
+      moves: 3
+      cost: 30
+      upkeep:
+        shields: 1
+        gold: 1
+
+- tech: "Explosives"
+  unlocks:
+    - kind: unit
+      name: "Engineers"
+      attack: 0
+      defense: 2
+      hp: 20
+      firepower: 1
+      moves: 2
+      cost: 30
+      upkeep:
+        shields: 1
+        gold: 1
+
+- tech: "Feudalism"
+  unlocks:
+    - kind: unit
+      name: "Pikemen"
+      attack: 2
+      defense: 3
       hp: 10
       firepower: 1
       moves: 1
-      cost: 20
+      cost: 30
+      upkeep:
+        food: 1
+        shields: 1
+        gold: 1
+    - kind: building
+      name: "Sun Tzu's War Academy"
+      cost: 300
+      upkeep: 0
 
-- tech: Horseback Riding
+- tech: "Flight"
   unlocks:
     - kind: unit
-      name: Horsemen
+      name: "Fighter"
+      attack: 4
+      defense: 4
+      hp: 20
+      firepower: 1
+      moves: 10
+      cost: 60
+      upkeep:
+        food: 1
+        shields: 1
+        gold: 1
+
+- tech: "Genetic Engineering"
+  unlocks:
+    - kind: building
+      name: "Cure For Cancer"
+      cost: 600
+      upkeep: 0
+
+- tech: "Guerilla Warfare"
+  unlocks:
+    - kind: unit
+      name: "Fanatics"
+      attack: 5
+      defense: 5
+      hp: 20
+      firepower: 1
+      moves: 1
+      cost: 20
+      pop_cost: 1
+      upkeep:
+        food: 1
+    - kind: unit
+      name: "Partisan"
+      attack: 4
+      defense: 5
+      hp: 20
+      firepower: 1
+      moves: 1
+      cost: 60
+      upkeep:
+        food: 1
+        shields: 1
+        gold: 1
+
+- tech: "Gunpowder"
+  unlocks:
+    - kind: unit
+      name: "Musketeers"
+      attack: 3
+      defense: 3
+      hp: 20
+      firepower: 1
+      moves: 1
+      cost: 40
+      upkeep:
+        food: 1
+        shields: 1
+        gold: 1
+    - kind: building
+      name: "Barracks II"
+      cost: 30
+      upkeep: 1
+
+- tech: "Horseback Riding"
+  unlocks:
+    - kind: unit
+      name: "Horsemen"
       attack: 2
       defense: 1
       hp: 10
       firepower: 1
       moves: 2
       cost: 20
+      upkeep:
+        food: 1
+        shields: 1
+        gold: 1
 
-- tech: Masonry
+- tech: "Industrialization"
   unlocks:
     - kind: building
-      name: City Walls
-      cost: 30
+      name: "Factory"
+      cost: 140
+      upkeep: 3
+
+- tech: "Invention"
+  unlocks:
+    - kind: building
+      name: "Leonardo's Workshop"
+      cost: 400
       upkeep: 0
 
-
-- tech: Ceremonial Burial
-  unlocks:
-    - kind: building
-      name: Temple
-      cost: 30
-      upkeep: 1
-
-# Tier 2
-- tech: Map Making
+- tech: "Iron Working"
   unlocks:
     - kind: unit
-      name: Trireme
-      attack: 0
-      defense: 1
-      hp: 10
-      firepower: 1
-      moves: 3
-      cost: 20
-      transport_cap: 2
-
-- tech: Writing
-  unlocks:
-    - kind: building
-      name: Library
-      cost: 60
-      upkeep: 1
-
-- tech: Iron Working
-  unlocks:
-    - kind: unit
-      name: Legion
+      name: "Legion"
       attack: 4
       defense: 2
       hp: 10
       firepower: 1
       moves: 1
       cost: 30
+      upkeep:
+        food: 1
+        shields: 1
+        gold: 1
+
+- tech: "Labor Union"
+  unlocks:
+    - kind: unit
+      name: "Mech. Inf."
+      attack: 6
+      defense: 6
+      hp: 30
+      firepower: 1
+      moves: 3
+      cost: 70
+      upkeep:
+        food: 1
+        shields: 1
+        gold: 1
+
+- tech: "Laser"
+  unlocks:
+    - kind: building
+      name: "SDI Defense"
+      cost: 140
+      upkeep: 3
+
+- tech: "Leadership"
+  unlocks:
+    - kind: unit
+      name: "Dragoons"
+      attack: 5
+      defense: 2
+      hp: 20
+      firepower: 1
+      moves: 2
+      cost: 50
+      upkeep:
+        food: 1
+        shields: 1
+        gold: 1
+
+- tech: "Literacy"
+  unlocks:
+    - kind: building
+      name: "Great Library"
+      cost: 300
+      upkeep: 0
+
+- tech: "Machine Tools"
+  unlocks:
+    - kind: unit
+      name: "Artillery"
+      attack: 10
+      defense: 2
+      hp: 20
+      firepower: 1
+      moves: 1
+      cost: 60
+      upkeep:
+        food: 1
+        shields: 1
+        gold: 1
+
+- tech: "Magnetism"
+  unlocks:
+    - kind: unit
+      name: "Caravel"
+      attack: 0
+      defense: 2
+      hp: 10
+      firepower: 1
+      moves: 3
+      cost: 30
+      upkeep:
+        food: 1
+        shields: 1
+        gold: 1
+    - kind: building
+      name: "Magellan's Expedition"
+      cost: 400
+      upkeep: 0
+
+- tech: "Map Making"
+  unlocks:
+    - kind: unit
+      name: "Trireme"
+      attack: 0
+      defense: 1
+      hp: 10
+      firepower: 1
+      moves: 3
+      cost: 20
+      upkeep:
+        food: 1
+        shields: 1
+        gold: 1
+    - kind: building
+      name: "Lighthouse"
+      cost: 200
+      upkeep: 0
+
+- tech: "Masonry"
+  unlocks:
+    - kind: building
+      name: "City Walls"
+      cost: 30
+      upkeep: 0
+    - kind: building
+      name: "Pyramids"
+      cost: 200
+      upkeep: 0
+
+- tech: "Mass Production"
+  unlocks:
+    - kind: unit
+      name: "Battleship"
+      attack: 12
+      defense: 12
+      hp: 30
+      firepower: 1
+      moves: 4
+      cost: 160
+      upkeep:
+        food: 1
+        shields: 1
+        gold: 1
+    - kind: building
+      name: "Mass Transit"
+      cost: 120
+      upkeep: 2
+
+- tech: "Mathematics"
+  unlocks:
+    - kind: unit
+      name: "Catapult"
+      attack: 6
+      defense: 1
+      hp: 10
+      firepower: 1
+      moves: 1
+      cost: 40
+      upkeep:
+        food: 1
+        shields: 1
+        gold: 1
+
+- tech: "Metallurgy"
+  unlocks:
+    - kind: unit
+      name: "Cannon"
+      attack: 8
+      defense: 1
+      hp: 20
+      firepower: 1
+      moves: 1
+      cost: 50
+      upkeep:
+        food: 1
+        shields: 1
+        gold: 1
+
+- tech: "Miniaturization"
+  unlocks:
+    - kind: building
+      name: "Offshore Platform"
+      cost: 120
+      upkeep: 3
+
+- tech: "Mobile Warfare"
+  unlocks:
+    - kind: unit
+      name: "Armor"
+      attack: 10
+      defense: 5
+      hp: 30
+      firepower: 1
+      moves: 3
+      cost: 90
+      upkeep:
+        food: 1
+        shields: 1
+        gold: 1
+    - kind: building
+      name: "Barracks III"
+      cost: 30
+      upkeep: 1
+
+- tech: "Monotheism"
+  unlocks:
+    - kind: unit
+      name: "Crusaders"
+      attack: 5
+      defense: 1
+      hp: 10
+      firepower: 1
+      moves: 2
+      cost: 40
+      upkeep:
+        food: 1
+        shields: 1
+        gold: 1
+    - kind: building
+      name: "Cathedral"
+      cost: 80
+      upkeep: 3
+    - kind: building
+      name: "Michelangelo's Chapel"
+      cost: 400
+      upkeep: 0
+
+- tech: "Mysticism"
+  unlocks:
+    - kind: building
+      name: "Temple of Artemis"
+      cost: 200
+      upkeep: 0
+
+- tech: "Navigation"
+  unlocks:
+    - kind: unit
+      name: "Frigate"
+      attack: 3
+      defense: 2
+      hp: 20
+      firepower: 1
+      moves: 4
+      cost: 40
+      upkeep:
+        food: 1
+        shields: 1
+        gold: 1
+    - kind: unit
+      name: "Galleon"
+      attack: 0
+      defense: 2
+      hp: 20
+      firepower: 1
+      moves: 4
+      cost: 40
+      upkeep:
+        food: 1
+        shields: 1
+        gold: 1
+    - kind: building
+      name: "Coastal Defense"
+      cost: 60
+      upkeep: 1
+
+- tech: "Nuclear Fission"
+  unlocks:
+    - kind: unit
+      name: "Nuclear"
+      attack: 99
+      defense: 0
+      hp: 10
+      firepower: 1
+      moves: 0
+      cost: 160
+      upkeep:
+        shields: 1
+        gold: 1
+    - kind: building
+      name: "Manhattan Project"
+      cost: 600
+      upkeep: 0
+
+- tech: "Nuclear Power"
+  unlocks:
+    - kind: building
+      name: "Nuclear Plant"
+      cost: 240
+      upkeep: 2
+
+- tech: "Plastics"
+  unlocks:
+    - kind: building
+      name: "Mfg. Plant"
+      cost: 220
+      upkeep: 4
+
+- tech: "Polytheism"
+  unlocks:
+    - kind: unit
+      name: "Elephants"
+      attack: 3
+      defense: 2
+      hp: 10
+      firepower: 1
+      moves: 2
+      cost: 30
+      upkeep:
+        food: 1
+        shields: 1
+        gold: 1
+    - kind: building
+      name: "Statue of Zeus"
+      cost: 200
+      upkeep: 0
+
+- tech: "Pottery"
+  unlocks:
+    - kind: unit
+      name: "Migrants"
+      attack: 0
+      defense: 1
+      hp: 20
+      firepower: 1
+      moves: 1
+      cost: 10
+      pop_cost: 1
+      upkeep:
+        food: 1
+    - kind: building
+      name: "Granary"
+      cost: 40
+      upkeep: 1
+    - kind: building
+      name: "Hanging Gardens"
+      cost: 200
+      upkeep: 0
+
+- tech: "Radio"
+  unlocks:
+    - kind: building
+      name: "Airport"
+      cost: 120
+      upkeep: 3
+
+- tech: "Railroad"
+  unlocks:
+    - kind: building
+      name: "Eiffel Tower"
+      cost: 300
+      upkeep: 0
+
+- tech: "Recycling"
+  unlocks:
+    - kind: building
+      name: "Recycling Center"
+      cost: 140
+      upkeep: 2
+
+- tech: "Refining"
+  unlocks:
+    - kind: building
+      name: "Power Plant"
+      cost: 130
+      upkeep: 4
+
+- tech: "Refrigeration"
+  unlocks:
+    - kind: building
+      name: "Supermarket"
+      cost: 80
+      upkeep: 3
+
+- tech: "Robotics"
+  unlocks:
+    - kind: unit
+      name: "Howitzer"
+      attack: 12
+      defense: 2
+      hp: 30
+      firepower: 1
+      moves: 1
+      cost: 80
+      upkeep:
+        food: 1
+        shields: 1
+        gold: 1
+
+- tech: "Rocketry"
+  unlocks:
+    - kind: unit
+      name: "AEGIS Cruiser"
+      attack: 8
+      defense: 8
+      hp: 30
+      firepower: 1
+      moves: 5
+      cost: 100
+      upkeep:
+        food: 1
+        shields: 1
+        gold: 1
+    - kind: unit
+      name: "Cruise Missile"
+      attack: 18
+      defense: 0
+      hp: 10
+      firepower: 1
+      moves: 16
+      cost: 50
+      upkeep:
+        shields: 1
+        gold: 1
+    - kind: building
+      name: "SAM Battery"
+      cost: 70
+      upkeep: 2
+
+- tech: "Sanitation"
+  unlocks:
+    - kind: building
+      name: "Sewer System"
+      cost: 80
+      upkeep: 2
+    - kind: building
+      name: "Shakespeare's Theater"
+      cost: 300
+      upkeep: 0
+
+- tech: "Seafaring"
+  unlocks:
+    - kind: unit
+      name: "Explorer"
+      attack: 0
+      defense: 1
+      hp: 10
+      firepower: 1
+      moves: 1
+      cost: 30
+      upkeep:
+        shields: 1
+        gold: 1
+    - kind: building
+      name: "Harbor"
+      cost: 40
+      upkeep: 1
+
+- tech: "Space Flight"
+  unlocks:
+    - kind: building
+      name: "Apollo Program"
+      cost: 600
+      upkeep: 0
+    - kind: building
+      name: "Space Structural"
+      cost: 150
+      upkeep: 0
+
+- tech: "Stealth"
+  unlocks:
+    - kind: unit
+      name: "Stealth Bomber"
+      attack: 9
+      defense: 5
+      hp: 30
+      firepower: 1
+      moves: 12
+      cost: 120
+      upkeep:
+        food: 1
+        shields: 1
+        gold: 1
+    - kind: unit
+      name: "Stealth Fighter"
+      attack: 8
+      defense: 8
+      hp: 20
+      firepower: 1
+      moves: 14
+      cost: 80
+      upkeep:
+        food: 1
+        shields: 1
+        gold: 1
+
+- tech: "Steam Engine"
+  unlocks:
+    - kind: unit
+      name: "Ironclad"
+      attack: 4
+      defense: 3
+      hp: 20
+      firepower: 1
+      moves: 4
+      cost: 50
+      upkeep:
+        food: 1
+        shields: 1
+        gold: 1
+    - kind: building
+      name: "Darwin's Voyage"
+      cost: 300
+      upkeep: 0
+
+- tech: "Steel"
+  unlocks:
+    - kind: unit
+      name: "Cruiser"
+      attack: 6
+      defense: 6
+      hp: 30
+      firepower: 1
+      moves: 5
+      cost: 80
+      upkeep:
+        food: 1
+        shields: 1
+        gold: 1
+
+- tech: "Superconductors"
+  unlocks:
+    - kind: building
+      name: "Space Component"
+      cost: 300
+      upkeep: 0
+
+- tech: "Tactics"
+  unlocks:
+    - kind: unit
+      name: "Alpine Troops"
+      attack: 7
+      defense: 4
+      hp: 20
+      firepower: 1
+      moves: 1
+      cost: 60
+      upkeep:
+        food: 1
+        shields: 1
+        gold: 1
+    - kind: unit
+      name: "Cavalry"
+      attack: 8
+      defense: 3
+      hp: 20
+      firepower: 1
+      moves: 2
+      cost: 60
+      upkeep:
+        food: 1
+        shields: 1
+        gold: 1
+
+- tech: "The Corporation"
+  unlocks:
+    - kind: unit
+      name: "Freight"
+      attack: 0
+      defense: 1
+      hp: 10
+      firepower: 1
+      moves: 2
+      cost: 50
+      upkeep:
+        shields: 1
+        gold: 1
+
+- tech: "The Wheel"
+  unlocks:
+    - kind: unit
+      name: "Chariot"
+      attack: 4
+      defense: 1
+      hp: 10
+      firepower: 1
+      moves: 2
+      cost: 30
+      upkeep:
+        food: 1
+        shields: 1
+        gold: 1
+
+- tech: "Theology"
+  unlocks:
+    - kind: building
+      name: "Ecclesiastical Palace"
+      cost: 140
+      upkeep: 0
+    - kind: building
+      name: "J.S. Bach's Cathedral"
+      cost: 400
+      upkeep: 0
+
+- tech: "Theory of Gravity"
+  unlocks:
+    - kind: building
+      name: "Isaac Newton's College"
+      cost: 400
+      upkeep: 0
+
+- tech: "Trade"
+  unlocks:
+    - kind: unit
+      name: "Caravan"
+      attack: 0
+      defense: 1
+      hp: 10
+      firepower: 1
+      moves: 1
+      cost: 50
+      upkeep:
+        shields: 1
+        gold: 1
+    - kind: building
+      name: "Marco Polo's Embassy"
+      cost: 200
+      upkeep: 0
+
+- tech: "University"
+  unlocks:
+    - kind: building
+      name: "University"
+      cost: 120
+      upkeep: 2
+
+- tech: "Warrior Code"
+  unlocks:
+    - kind: unit
+      name: "Archers"
+      attack: 3
+      defense: 1
+      hp: 10
+      firepower: 1
+      moves: 1
+      cost: 20
+      upkeep:
+        food: 1
+        shields: 1
+        gold: 1
+
+- tech: "Writing"
+  unlocks:
+    - kind: building
+      name: "Library"
+      cost: 60
+      upkeep: 1

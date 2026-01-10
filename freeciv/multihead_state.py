@@ -196,6 +196,9 @@ class MultiheadState:
     acted_unit_slots: Dict[Player, set[int]] = field(
         default_factory=lambda: {1: set(), -1: set()}
     )
+    acted_production_cities: Dict[Player, set[int]] = field(
+        default_factory=lambda: {1: set(), -1: set()}
+    )
     kills: Dict[Player, int] = field(default_factory=lambda: {1: 0, -1: 0})
     units_built: Dict[Player, int] = field(default_factory=lambda: {1: 0, -1: 0})
     future_techs: Dict[Player, int] = field(default_factory=lambda: {1: 0, -1: 0})
@@ -459,6 +462,10 @@ class MultiheadState:
             1: set(self.acted_unit_slots.get(1, set())),
             -1: set(self.acted_unit_slots.get(-1, set())),
         }
+        new.acted_production_cities = {
+            1: set(self.acted_production_cities.get(1, set())),
+            -1: set(self.acted_production_cities.get(-1, set())),
+        }
         new.kills = dict(self.kills)
         new.units_built = dict(self.units_built)
         new.future_techs = dict(self.future_techs)
@@ -492,11 +499,14 @@ class MultiheadState:
             return moves
         # move head
         acted_slots = self.acted_unit_slots.get(player, set())
+        auto_workers = getattr(self.cfg, "auto_worker_units", False)
         for idx in range(self.max_units):
             move_base = idx * self.MOVE_PER_UNIT
             atk_base = self.MOVE_SIZE + idx * self.ATTACK_PER_UNIT
             u = self.units[player][idx] if idx < len(self.units[player]) else None
             if u is None or not u.alive or idx in acted_slots:
+                continue
+            if auto_workers and self._unit_is_worker_like(u.unit_type):
                 continue
             neighbors = self.movement.get_native_neighbors(u.x, u.y)
             for dir_idx, (nx, ny) in enumerate(neighbors):
@@ -541,14 +551,22 @@ class MultiheadState:
                 moves[build_offset + idx] = 1
         # production actions (per city slot)
         prod_offset = offset + self.ECON_PRODUCTION_OFFSET
+        acted_prod = self.acted_production_cities.get(player, set())
         for city_idx in range(min(len(self.cities[player]), self.max_cities)):
+            if city_idx in acted_prod:
+                continue
             city = self.cities[player][city_idx]
+            unit_count = self._city_unit_count(player, city_idx)
+            min_units = int(getattr(self.cfg, "city_unit_min", 0))
+            free_units = int(getattr(self.cfg, "city_unit_free", 0))
             queue_limit = getattr(self.cfg, "production_queue_max", 0)
             if city.production_target and queue_limit > 0:
                 if len(city.production_queue) >= queue_limit:
                     continue
             for item_idx, (kind, name) in enumerate(PRODUCTION_ITEM_NAMES):
                 if kind == "unit":
+                    if free_units > 0 and unit_count >= free_units:
+                        continue
                     if name == "Settlers" and city.size <= 3:
                         continue
                     if self._city_unit_count(player, city_idx) >= self.cfg.city_unit_cap:
@@ -558,6 +576,8 @@ class MultiheadState:
                     if self._unit_obsolete(player, name):
                         continue
                 else:
+                    if min_units > 0 and unit_count < min_units:
+                        continue
                     if not self._building_unlocked(player, city, name):
                         continue
                 moves[
@@ -644,8 +664,11 @@ class MultiheadState:
                     city = self.cities[player][city_slot]
                     kind, name = PRODUCTION_ITEM_NAMES[item_idx]
                     queue_limit = getattr(self.cfg, "production_queue_max", 0)
+                    queue_add = max(1, int(getattr(self.cfg, "production_queue_add", 1)))
                     if city.production_target:
-                        if queue_limit <= 0 or len(city.production_queue) < queue_limit:
+                        for _ in range(queue_add):
+                            if queue_limit > 0 and len(city.production_queue) >= queue_limit:
+                                break
                             city.production_queue.append((kind, name))
                     else:
                         if kind == "unit":
@@ -653,11 +676,20 @@ class MultiheadState:
                                 city.production_kind = "unit"
                                 city.production_target = name
                                 city.production_progress = 0.0
+                                for _ in range(queue_add - 1):
+                                    if queue_limit > 0 and len(city.production_queue) >= queue_limit:
+                                        break
+                                    city.production_queue.append((kind, name))
                         else:
                             if self._building_unlocked(player, city, name):
                                 city.production_kind = "building"
                                 city.production_target = name
                                 city.production_progress = 0.0
+                                for _ in range(queue_add - 1):
+                                    if queue_limit > 0 and len(city.production_queue) >= queue_limit:
+                                        break
+                                    city.production_queue.append((kind, name))
+                    self.acted_production_cities.setdefault(player, set()).add(city_slot)
         self._resolve_terminal()
         # Stay in the same turn unless we exceed the per-turn action cap.
         self.actions_this_turn += 1
@@ -871,8 +903,6 @@ class MultiheadState:
 
     def _refresh_production_queue(self, player: Player) -> None:
         for city in self.cities[player]:
-            if not city.production_queue:
-                continue
             updated: list[tuple[str, str]] = []
             changed = False
             for kind, name in city.production_queue:
@@ -884,17 +914,49 @@ class MultiheadState:
                 updated.append((kind, name))
             if changed:
                 city.production_queue = updated
+            current_kind = city.production_kind
+            current_name = city.production_target
+            if current_kind is None and current_name is None and city.production_queue:
+                current_kind, current_name = city.production_queue[0]
+            if current_kind != "unit" or not current_name:
+                continue
+            upgraded = self._upgrade_unit_name(player, current_name)
+            if upgraded == current_name:
+                continue
+            existing_units = {
+                name for kind, name in city.production_queue if kind == "unit"
+            }
+            if upgraded in existing_units:
+                continue
+            queue_limit = getattr(self.cfg, "production_queue_max", 0)
+            if queue_limit > 0 and len(city.production_queue) >= queue_limit:
+                continue
+            city.production_queue.append(("unit", upgraded))
 
     def _building_is_palace(self, building_name: str) -> bool:
         return "palace" in (building_name or "").lower()
+
+    def _building_allowed_by_wonder_policy(self, building_name: str) -> bool:
+        if building_name not in GREAT_WONDER_NAMES:
+            return True
+        allowlist = getattr(self.cfg, "wonder_production_allowlist", ())
+        if allowlist:
+            return building_name in allowlist
+        blocklist = getattr(self.cfg, "wonder_production_blocklist", ())
+        return building_name not in blocklist
 
     def _building_unlocked(
         self, player: Player, city: City, building_name: str
     ) -> bool:
         if self._building_is_palace(building_name):
             return False
+        if not self._building_allowed_by_wonder_policy(building_name):
+            return False
         if building_name in city.buildings:
             return False
+        if (building_name or "").lower() == "aqueduct":
+            if not self.research_done[player].get("Construction", False):
+                return False
         lowered = (building_name or "").lower()
         if lowered.startswith("aqueduct") and ("river" in lowered or "lake" in lowered):
             return False
@@ -909,11 +971,21 @@ class MultiheadState:
         return True
 
     def _city_unit_count(self, player: Player, city_idx: int) -> int:
-        return sum(
+        count = sum(
             1
             for u in self.units[player]
             if u.alive and u.home_city == city_idx
         )
+        if city_idx < len(self.cities[player]):
+            city = self.cities[player][city_idx]
+            tile_count = sum(
+                1
+                for u in self.units[player]
+                if u.alive and u.home_city is None and u.x == city.x and u.y == city.y
+            )
+            if tile_count > count:
+                count = tile_count
+        return count
 
     def _add_city(
         self, player: Player, x: int, y: int, *, has_city_walls: bool = False
@@ -1140,6 +1212,8 @@ class MultiheadState:
         self.turn += 1
         self.actions_this_turn = 0
         self.acted_unit_slots = {1: set(), -1: set()}
+        self.acted_production_cities = {1: set(), -1: set()}
+        self.acted_production_cities = {1: set(), -1: set()}
         if self.turn >= self.cfg.max_turns and self.winner is None:
             self.winner = 0
             self.terminal_reason = "max_turns"
