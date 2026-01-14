@@ -557,6 +557,11 @@ class MultiheadState:
                 continue
             city = self.cities[player][city_idx]
             unit_count = self._city_unit_count(player, city_idx)
+            garrison_count = sum(
+                1
+                for u in self.units[player]
+                if u.alive and u.x == city.x and u.y == city.y
+            )
             min_units = int(getattr(self.cfg, "city_unit_min", 0))
             free_units = int(getattr(self.cfg, "city_unit_free", 0))
             queue_limit = getattr(self.cfg, "production_queue_max", 0)
@@ -565,9 +570,16 @@ class MultiheadState:
                     continue
             for item_idx, (kind, name) in enumerate(PRODUCTION_ITEM_NAMES):
                 if kind == "unit":
-                    if free_units > 0 and unit_count >= free_units:
+                    if self._unit_is_excluded(name):
                         continue
-                    if name == "Settlers" and city.size <= 3:
+                    if name == "Settlers" and city.size < 3:
+                        continue
+                    if (
+                        free_units > 0
+                        and unit_count >= free_units
+                        and garrison_count >= min_units
+                        and name != "Settlers"
+                    ):
                         continue
                     if self._city_unit_count(player, city_idx) >= self.cfg.city_unit_cap:
                         continue
@@ -576,6 +588,16 @@ class MultiheadState:
                     if self._unit_obsolete(player, name):
                         continue
                 else:
+                    if (
+                        city.production_kind == "building"
+                        and city.production_target == name
+                    ):
+                        continue
+                    if any(
+                        queued_kind == "building" and queued_name == name
+                        for queued_kind, queued_name in city.production_queue
+                    ):
+                        continue
                     if min_units > 0 and unit_count < min_units:
                         continue
                     if not self._building_unlocked(player, city, name):
@@ -665,18 +687,36 @@ class MultiheadState:
                     kind, name = PRODUCTION_ITEM_NAMES[item_idx]
                     queue_limit = getattr(self.cfg, "production_queue_max", 0)
                     queue_add = max(1, int(getattr(self.cfg, "production_queue_add", 1)))
+                    add_count = 1 if kind == "building" else queue_add
+                    if kind == "unit":
+                        name = self._upgrade_unit_name(player, name)
                     if city.production_target:
-                        for _ in range(queue_add):
-                            if queue_limit > 0 and len(city.production_queue) >= queue_limit:
-                                break
-                            city.production_queue.append((kind, name))
+                        if kind == "building":
+                            if (
+                                city.production_kind == "building"
+                                and city.production_target == name
+                            ):
+                                pass
+                            elif any(
+                                queued_kind == "building" and queued_name == name
+                                for queued_kind, queued_name in city.production_queue
+                            ):
+                                pass
+                            else:
+                                if queue_limit <= 0 or len(city.production_queue) < queue_limit:
+                                    city.production_queue.append((kind, name))
+                        else:
+                            for _ in range(add_count):
+                                if queue_limit > 0 and len(city.production_queue) >= queue_limit:
+                                    break
+                                city.production_queue.append((kind, name))
                     else:
                         if kind == "unit":
                             if self._unit_unlocked(player, name):
                                 city.production_kind = "unit"
                                 city.production_target = name
                                 city.production_progress = 0.0
-                                for _ in range(queue_add - 1):
+                                for _ in range(add_count - 1):
                                     if queue_limit > 0 and len(city.production_queue) >= queue_limit:
                                         break
                                     city.production_queue.append((kind, name))
@@ -685,7 +725,7 @@ class MultiheadState:
                                 city.production_kind = "building"
                                 city.production_target = name
                                 city.production_progress = 0.0
-                                for _ in range(queue_add - 1):
+                                for _ in range(add_count - 1):
                                     if queue_limit > 0 and len(city.production_queue) >= queue_limit:
                                         break
                                     city.production_queue.append((kind, name))
@@ -843,6 +883,10 @@ class MultiheadState:
         label = (unit_name or "").lower()
         return any(tag in label for tag in ("worker", "engineer", "migrant"))
 
+    def _unit_is_excluded(self, unit_name: str) -> bool:
+        label = (unit_name or "").lower()
+        return any(tag in label for tag in ("diplomat", "explorer"))
+
     def _player_has_worker_like(self, player: Player) -> bool:
         return any(
             u.alive and self._unit_is_worker_like(u.unit_type) for u in self.units[player]
@@ -854,6 +898,8 @@ class MultiheadState:
         best = None
         for name in chain:
             if name in UNIT_SPECS and self._unit_unlocked(player, name):
+                if self._unit_is_excluded(name):
+                    continue
                 best = name
         return best
 

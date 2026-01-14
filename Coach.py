@@ -2,6 +2,7 @@ import csv
 import logging
 import os
 import sys
+import time
 from collections import deque
 from pickle import Pickler, Unpickler
 from random import shuffle
@@ -39,6 +40,40 @@ class Coach():
             self.tb_writer = SummaryWriter(log_dir)
         else:
             self.tb_writer = None
+        self.selfplay_episode = 0
+        self.live_log_counter = 0
+        self.live_log_next = None
+        self.live_log_stats = None
+
+    def _log_live_stats(self, force: bool = False) -> None:
+        if not self.tb_writer or not self.live_log_stats:
+            return
+        now = time.time()
+        if not force and self.live_log_next is not None and now < self.live_log_next:
+            return
+        self.live_log_next = now + 0.5
+        self.live_log_counter += 1
+        stats = self.live_log_stats
+        self.tb_writer.add_scalar(
+            "0.Live/Total_reward",
+            float(stats.get("total_reward", 0.0)),
+            self.live_log_counter,
+        )
+        self.tb_writer.add_scalar(
+            "0.Live/Player1_reward",
+            float(stats.get("player_rewards", {}).get(1, 0.0)),
+            self.live_log_counter,
+        )
+        self.tb_writer.add_scalar(
+            "0.Live/Player2_reward",
+            float(stats.get("player_rewards", {}).get(-1, 0.0)),
+            self.live_log_counter,
+        )
+        self.tb_writer.add_scalar(
+            "0.Live/Episode_length",
+            float(stats.get("episode_length", 0.0)),
+            self.live_log_counter,
+        )
 
     def executeEpisode(self):
         """
@@ -83,6 +118,7 @@ class Coach():
                 player_rewards[acting_player] += float(delta)
                 total_reward += float(delta)
 
+            self._log_live_stats()
             r = self.game.getGameEnded(board, self.curPlayer)
 
             if r != 0:
@@ -125,6 +161,30 @@ class Coach():
                     player1_rewards.append(stats["player_rewards"].get(1, 0.0))
                     player2_rewards.append(stats["player_rewards"].get(-1, 0.0))
                     episode_lengths.append(stats["episode_length"])
+                    self.live_log_stats = stats
+                    self._log_live_stats(force=True)
+                    if self.tb_writer:
+                        self.selfplay_episode += 1
+                        self.tb_writer.add_scalar(
+                            "0.Episode/Total_reward",
+                            float(stats["total_reward"]),
+                            self.selfplay_episode,
+                        )
+                        self.tb_writer.add_scalar(
+                            "0.Episode/Player1_reward",
+                            float(stats["player_rewards"].get(1, 0.0)),
+                            self.selfplay_episode,
+                        )
+                        self.tb_writer.add_scalar(
+                            "0.Episode/Player2_reward",
+                            float(stats["player_rewards"].get(-1, 0.0)),
+                            self.selfplay_episode,
+                        )
+                        self.tb_writer.add_scalar(
+                            "0.Episode/Length",
+                            float(stats["episode_length"]),
+                            self.selfplay_episode,
+                        )
                 log.info("Finished self-play; examples collected: %d", len(iterationTrainExamples))
                 if self.tb_writer and total_rewards:
                     mean_total = float(np.mean(total_rewards))

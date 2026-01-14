@@ -1,9 +1,14 @@
 from __future__ import annotations
 
 import argparse
+import json
+import os
+import random
+import shlex
+import signal
+import subprocess
 import time
 from dataclasses import dataclass, field
-import random
 from pathlib import Path
 from typing import Dict, Iterable, List, Optional, Set, Tuple
 
@@ -21,9 +26,11 @@ try:
         player_knows_tech,
         set_player_research,
         list_visible_tiles_call,
+        list_player_scores,
         parse_position_result,
         parse_vision_tiles,
         simple_find_unit_pos,
+        auto_settler,
     )
 except Exception:
     import sys
@@ -44,9 +51,11 @@ except Exception:
             player_knows_tech,
             set_player_research,
             list_visible_tiles_call,
+            list_player_scores,
             parse_position_result,
             parse_vision_tiles,
             simple_find_unit_pos,
+            auto_settler,
         )
     except Exception as exc:  # pragma: no cover - optional dependency
         raise RuntimeError(
@@ -338,6 +347,14 @@ def query_player_research(client: LuaRemoteClient, player_id: int) -> str:
         return val if isinstance(val, str) else "__NORESEARCH__"
     except Exception:
         return "__NORESEARCH__"
+
+
+def _resolve_score_log_path(path_str: Optional[str]) -> Optional[Path]:
+    if not path_str:
+        return None
+    path = Path(path_str).expanduser()
+    path.parent.mkdir(parents=True, exist_ok=True)
+    return path
 
 
 def set_research_to_target(
@@ -670,6 +687,42 @@ def parse_tech_weights(raw_values: List[str]) -> Dict[str, float]:
     return weights
 
 
+def _start_client_process(client_cmd: str, luaremote_port: int) -> subprocess.Popen:
+    cmd = shlex.split(client_cmd)
+    if not cmd:
+        raise RuntimeError("Client command is empty.")
+    env = os.environ.copy()
+    env.setdefault("ENABLE_LUAREMOTE", "1")
+    env.setdefault("FREECIV_LUAREMOTE_PORT", str(luaremote_port))
+    return subprocess.Popen(cmd, start_new_session=True, env=env)
+
+
+def _stop_client_process(proc: subprocess.Popen) -> None:
+    if proc.poll() is not None:
+        return
+    try:
+        os.killpg(proc.pid, signal.SIGTERM)
+        proc.wait(timeout=10)
+    except subprocess.TimeoutExpired:
+        os.killpg(proc.pid, signal.SIGKILL)
+        proc.wait(timeout=5)
+
+
+def _connect_with_retry(client: LuaRemoteClient, timeout: float, wait: float) -> None:
+    deadline = time.monotonic() + max(0.0, timeout)
+    last_exc = None
+    while time.monotonic() < deadline:
+        try:
+            client.connect()
+            return
+        except Exception as exc:
+            last_exc = exc
+            time.sleep(max(0.0, wait))
+    raise RuntimeError(
+        f"Failed to connect to LuaRemote at {client.host}:{client.port}"
+    ) from last_exc
+
+
 def apply_tech_weights(pi: np.ndarray, board_state: FreecivBoardState, weights: Dict[str, float]) -> np.ndarray:
     """
     Apply optional multiplicative weights to research actions in the policy vector.
@@ -739,6 +792,25 @@ def run_multihead_agent(
     turns = 0
     queued_city_production: Set[int] = set()
     last_research_flags: Dict[str, bool] = {}
+    score_log_path = _resolve_score_log_path(getattr(args, "score_log", None))
+    score_log_interval = int(getattr(args, "score_log_interval", 0) or 0)
+    autosettler_units: Set[int] = set()
+
+    def _maybe_log_scores(turn: int) -> None:
+        if score_log_path is None or score_log_interval <= 0:
+            return
+        if turn <= 0 or turn % score_log_interval != 0:
+            return
+        scores = list_player_scores(client)
+        p0 = scores.get(0, (None, None, ""))[0]
+        p1 = scores.get(1, (None, None, ""))[0]
+        payload = {
+            "turn": turn,
+            "player0_score": p0,
+            "player1_score": p1,
+        }
+        with score_log_path.open("a", encoding="utf-8") as handle:
+            handle.write(json.dumps(payload) + "\n")
 
     def can_research_now(tech_name: str, flags: Dict[str, bool]) -> bool:
         """
@@ -761,6 +833,17 @@ def run_multihead_agent(
         controlled_units, player_id = discover_controlled_units(client, player_id)
         controlled_units = sorted(controlled_units)
         owned_cities = discover_player_cities(client, player_id)
+        for uid in controlled_units:
+            if uid in autosettler_units:
+                continue
+            label = _unit_label(uid).lower()
+            if "worker" in label or "engineer" in label or "migrant" in label:
+                try:
+                    ok = auto_settler(client, uid)
+                except Exception:
+                    ok = False
+                if ok:
+                    autosettler_units.add(uid)
         if not controlled_units:
             # No active units (e.g., settler was consumed founding a city). Keep the game progressing
             # so production/research can create new units.
@@ -1201,6 +1284,7 @@ def run_multihead_agent(
 
         client.end_turn()
         turns += 1
+        _maybe_log_scores(turns)
 
     print(f"Completed {steps} steps across {turns} turns; exiting.")
 
@@ -1214,7 +1298,7 @@ def main() -> None:
     ap.add_argument('--player-id', type=int, help='Restrict auto-discovery to a specific player id.')
     ap.add_argument('--checkpoint', required=True)
     ap.add_argument('--mode', choices=['default', 'multihead'], default='default')
-    ap.add_argument('--max-units', type=int, default=4, help='Max unit slots for multihead mode')
+    ap.add_argument('--max-units', type=int, default=6, help='Max unit slots for multihead mode')
     ap.add_argument('--map-width', type=int, default=9)
     ap.add_argument('--map-height', type=int, default=9)
     ap.add_argument('--max-turns', type=int, default=64)
@@ -1223,6 +1307,29 @@ def main() -> None:
     ap.add_argument('--dir-ids', default='0,1,4,7,6,3')
     ap.add_argument('--sleep', type=float, default=0.1)
     ap.add_argument('--max-steps', type=int, default=800)
+    ap.add_argument('--score-log', default=None, help='Write civ scores to JSONL every N turns.')
+    ap.add_argument('--score-log-interval', type=int, default=25)
+    ap.add_argument(
+        '--client-cmd',
+        help="Optional command to launch a Freeciv client (headless or GUI).",
+    )
+    ap.add_argument(
+        '--no-client',
+        action='store_true',
+        help='Do not auto-start a client even if FREECIV_CLIENT_CMD is set.',
+    )
+    ap.add_argument(
+        '--client-start-wait',
+        type=float,
+        default=1.0,
+        help='Seconds between LuaRemote connection attempts when auto-starting a client.',
+    )
+    ap.add_argument(
+        '--client-start-timeout',
+        type=float,
+        default=30.0,
+        help='Max seconds to wait for LuaRemote when auto-starting a client.',
+    )
     ap.add_argument(
         '--tech-weight',
         action='append',
@@ -1245,335 +1352,352 @@ def main() -> None:
     else:
         nnet = load_network(checkpoint_path, map_cfg)
 
-    client = LuaRemoteClient(args.host, args.port, timeout=args.timeout)
-    client.connect()
+    client_cmd = None
+    if not args.no_client:
+        client_cmd = args.client_cmd or os.getenv("FREECIV_CLIENT_CMD")
 
-    unit_type_labels: Dict[int, str] = {}
+    client = None
+    client_process = None
     try:
-        unit_type_labels = list_all_unit_types(client)
-    except Exception:
-        unit_type_labels = {}
+        if client_cmd:
+            client_process = _start_client_process(client_cmd, args.port)
 
-    player_id: Optional[int] = args.player_id
-    controlled_units: List[int]
-    if args.unit_id is not None:
-        controlled_units = [args.unit_id]
-        pos_result = client.eval(simple_find_unit_pos(args.unit_id))
-        pos_info = parse_position_result(pos_result)
-        if pos_info and pos_info[2] is not None and pos_info[2] >= 0:
-            player_id = int(pos_info[2])
-    else:
-        controlled_units, player_id = discover_controlled_units(client, player_id)
-        if not controlled_units:
-            raise SystemExit(
-                "No controllable units were discovered. Provide --unit-id or --player-id to limit the search."
-            )
-        print(
-            f"Discovered {len(controlled_units)} unit(s) for player {player_id if player_id is not None else 'unknown'}."
-        )
+        client = LuaRemoteClient(args.host, args.port, timeout=args.timeout)
+        if client_cmd:
+            _connect_with_retry(client, args.client_start_timeout, args.client_start_wait)
+        else:
+            client.connect()
 
-    movement = FreecivMovement(map_width=map_cfg.map_w, map_height=map_cfg.map_h)
-    known_tiles: Dict[Tuple[int, int], str] = {}
-    known_enemy: Dict[Tuple[int, int], bool] = {}
-    visited_tiles: Set[Tuple[int, int]] = set()
-    previous_pos: Dict[int, Optional[Tuple[int, int]]] = {uid: None for uid in controlled_units}
-    owned_cities = discover_player_cities(client, player_id)
-    queued_city_production: Set[int] = set()
-    last_research_flags: Dict[str, bool] = {}
-    known_enemy_target: Optional[Tuple[int, int]] = None
-
-    # Preload unlock values for production selection
-    unlock_path = Path(__file__).resolve().parent / "data" / "tech_unlocks.yaml"
-    try:
-        unit_values = load_unit_values(unlock_path)
-        print(f"[config] loaded {len(unit_values)} unit values from {unlock_path}")
-    except Exception as exc:
-        unit_values = {}
-        print(f"[config] failed to load unit values from {unlock_path}: {exc}")
-    unit_strengths = {name: val for name, (_tech, val) in unit_values.items()}
-
-    steps = 0
-    turns = 0
-
-    if args.mode == "multihead":
-        assert game is not None
-        run_multihead_agent(
-            args=args,
-            client=client,
-            game=game,
-            nnet=nnet,
-            map_cfg=map_cfg,
-            dir_ids=dir_ids,
-            tech_weights=tech_weights,
-            unit_type_labels=unit_type_labels,
-            unit_values=unit_values,
-            player_id=player_id,
-            controlled_units=controlled_units,
-            movement=movement,
-            known_tiles=known_tiles,
-            known_enemy=known_enemy,
-            visited_tiles=visited_tiles,
-        )
-        return
-
-    while steps < args.max_steps:
+        unit_type_labels: Dict[int, str] = {}
         try:
             unit_type_labels = list_all_unit_types(client)
         except Exception:
-            pass
-        if not controlled_units:
-            if player_id is not None:
-                refreshed_units, player_id = discover_controlled_units(client, player_id)
-                if refreshed_units:
-                    controlled_units.extend(refreshed_units)
-                    for uid in refreshed_units:
-                        previous_pos[uid] = None
-                    print(f"[units] refreshed and found {len(refreshed_units)} unit(s)")
-            # Refresh city info before deciding to exit.
-            owned_cities = discover_player_cities(client, player_id)
+            unit_type_labels = {}
+        player_id: Optional[int] = args.player_id
+        controlled_units: List[int]
+        if args.unit_id is not None:
+            controlled_units = [args.unit_id]
+            pos_result = client.eval(simple_find_unit_pos(args.unit_id))
+            pos_info = parse_position_result(pos_result)
+            if pos_info and pos_info[2] is not None and pos_info[2] >= 0:
+                player_id = int(pos_info[2])
+        else:
+            controlled_units, player_id = discover_controlled_units(client, player_id)
             if not controlled_units:
-                if owned_cities:
-                    # Ensure research is explicitly set even when no units are active.
-                    set_research_to_target(client, player_id, research_flags=last_research_flags or {})
-                    # No active units; just end turn and let existing research/production progress.
-                    client.end_turn()
-                    turns += 1
-                    steps += 1
-                    owned_cities = discover_player_cities(client, player_id)
-                    time.sleep(args.sleep)
-                    continue
-                break
-        acted_this_turn = False
-        for unit_id in list(controlled_units):
-            if steps >= args.max_steps:
-                break
-            unit_desc = format_unit_label(unit_id, unit_type_labels)
-            label_lower = unit_type_labels.get(unit_id, "").lower()
-            is_settler = "settler" in label_lower
-            # Precompute enemy strengths for this turn to guide attack decisions.
-            enemy_strengths = enemy_strength_map(client, player_id, unit_values)
-            try:
-                snapshot, player_id = gather_snapshot(
-                    client=client,
-                    movement=movement,
-                    cfg=map_cfg,
-                    unit_id=unit_id,
-                    player_id=player_id,
-                    known_tiles=known_tiles,
-                    known_enemy=known_enemy,
-                    visited_tiles=visited_tiles,
+                raise SystemExit(
+                    "No controllable units were discovered. Provide --unit-id or --player-id to limit the search."
                 )
-                if last_research_flags and snapshot.research_flags != last_research_flags:
-                    queued_city_production.clear()
-                    print(f"[research-status] flags changed; will requeue production for all cities")
-                last_research_flags = snapshot.research_flags
-                print(f"[research-status] current={snapshot.research_name} flags={snapshot.research_flags}")
-            except RuntimeError as exc:
-                print(f"[step {steps}] unit={unit_desc} unavailable: {exc}")
-                controlled_units.remove(unit_id)
-                previous_pos.pop(unit_id, None)
-                continue
-            visited_tiles.add(snapshot.player_pos)
-            # Track first seen enemy location (city or unit); cities do not move.
-            if known_enemy_target is None:
-                for (nx, ny), status in snapshot.status_lookup.items():
-                    if not status:
-                        continue
-                    _au_char, enemy_flag, enemy_units, _friendly_units, *_rest = status
-                    if enemy_flag or enemy_units or snapshot.enemy_map[ny, nx]:
-                        known_enemy_target = (nx, ny)
-                        print(f"[target] locked enemy location at ({nx},{ny})")
-                        break
+            print(
+                f"Discovered {len(controlled_units)} unit(s) for player {player_id if player_id is not None else 'unknown'}."
+            )
 
-        # Found a city immediately if none exists.
-            if not owned_cities and is_settler:
-                city_name = f"AutoCity{len(owned_cities) + 1}"
-                built = client.found_city(unit_id, city_name)
-                action_desc = f"founded city '{city_name}'"
-                if not built:
-                    built = client.build_city(unit_id)
-                    action_desc = "built a city"
-                if built:
-                    print(f"[step {steps}] unit={unit_desc} {action_desc}")
-                    owned_cities = discover_player_cities(client, player_id)
+        movement = FreecivMovement(map_width=map_cfg.map_w, map_height=map_cfg.map_h)
+        known_tiles: Dict[Tuple[int, int], str] = {}
+        known_enemy: Dict[Tuple[int, int], bool] = {}
+        visited_tiles: Set[Tuple[int, int]] = set()
+        previous_pos: Dict[int, Optional[Tuple[int, int]]] = {uid: None for uid in controlled_units}
+        owned_cities = discover_player_cities(client, player_id)
+        queued_city_production: Set[int] = set()
+        last_research_flags: Dict[str, bool] = {}
+        known_enemy_target: Optional[Tuple[int, int]] = None
+
+        # Preload unlock values for production selection
+        unlock_path = Path(__file__).resolve().parent / "data" / "tech_unlocks.yaml"
+        try:
+            unit_values = load_unit_values(unlock_path)
+            print(f"[config] loaded {len(unit_values)} unit values from {unlock_path}")
+        except Exception as exc:
+            unit_values = {}
+            print(f"[config] failed to load unit values from {unlock_path}: {exc}")
+        unit_strengths = {name: val for name, (_tech, val) in unit_values.items()}
+
+        steps = 0
+        turns = 0
+
+        if args.mode == "multihead":
+            assert game is not None
+            run_multihead_agent(
+                args=args,
+                client=client,
+                game=game,
+                nnet=nnet,
+                map_cfg=map_cfg,
+                dir_ids=dir_ids,
+                tech_weights=tech_weights,
+                unit_type_labels=unit_type_labels,
+                unit_values=unit_values,
+                player_id=player_id,
+                controlled_units=controlled_units,
+                movement=movement,
+                known_tiles=known_tiles,
+                known_enemy=known_enemy,
+                visited_tiles=visited_tiles,
+            )
+            return
+
+        while steps < args.max_steps:
+            try:
+                unit_type_labels = list_all_unit_types(client)
+            except Exception:
+                pass
+            if not controlled_units:
+                if player_id is not None:
+                    refreshed_units, player_id = discover_controlled_units(client, player_id)
+                    if refreshed_units:
+                        controlled_units.extend(refreshed_units)
+                        for uid in refreshed_units:
+                            previous_pos[uid] = None
+                        print(f"[units] refreshed and found {len(refreshed_units)} unit(s)")
+                # Refresh city info before deciding to exit.
+                owned_cities = discover_player_cities(client, player_id)
+                if not controlled_units:
+                    if owned_cities:
+                        # Ensure research is explicitly set even when no units are active.
+                        set_research_to_target(client, player_id, research_flags=last_research_flags or {})
+                        # No active units; just end turn and let existing research/production progress.
+                        client.end_turn()
+                        turns += 1
+                        steps += 1
+                        owned_cities = discover_player_cities(client, player_id)
+                        time.sleep(args.sleep)
+                        continue
+                    break
+            acted_this_turn = False
+            for unit_id in list(controlled_units):
+                if steps >= args.max_steps:
+                    break
+                unit_desc = format_unit_label(unit_id, unit_type_labels)
+                label_lower = unit_type_labels.get(unit_id, "").lower()
+                is_settler = "settler" in label_lower
+                # Precompute enemy strengths for this turn to guide attack decisions.
+                enemy_strengths = enemy_strength_map(client, player_id, unit_values)
+                try:
+                    snapshot, player_id = gather_snapshot(
+                        client=client,
+                        movement=movement,
+                        cfg=map_cfg,
+                        unit_id=unit_id,
+                        player_id=player_id,
+                        known_tiles=known_tiles,
+                        known_enemy=known_enemy,
+                        visited_tiles=visited_tiles,
+                    )
+                    if last_research_flags and snapshot.research_flags != last_research_flags:
+                        queued_city_production.clear()
+                        print(f"[research-status] flags changed; will requeue production for all cities")
+                    last_research_flags = snapshot.research_flags
+                    print(f"[research-status] current={snapshot.research_name} flags={snapshot.research_flags}")
+                except RuntimeError as exc:
+                    print(f"[step {steps}] unit={unit_desc} unavailable: {exc}")
                     controlled_units.remove(unit_id)
                     previous_pos.pop(unit_id, None)
+                    continue
+                visited_tiles.add(snapshot.player_pos)
+                # Track first seen enemy location (city or unit); cities do not move.
+                if known_enemy_target is None:
+                    for (nx, ny), status in snapshot.status_lookup.items():
+                        if not status:
+                            continue
+                        _au_char, enemy_flag, enemy_units, _friendly_units, *_rest = status
+                        if enemy_flag or enemy_units or snapshot.enemy_map[ny, nx]:
+                            known_enemy_target = (nx, ny)
+                            print(f"[target] locked enemy location at ({nx},{ny})")
+                            break
+
+                # Found a city immediately if none exists.
+                if not owned_cities and is_settler:
+                    city_name = f"AutoCity{len(owned_cities) + 1}"
+                    built = client.found_city(unit_id, city_name)
+                    action_desc = f"founded city '{city_name}'"
+                    if not built:
+                        built = client.build_city(unit_id)
+                        action_desc = "built a city"
+                    if built:
+                        print(f"[step {steps}] unit={unit_desc} {action_desc}")
+                        owned_cities = discover_player_cities(client, player_id)
+                        controlled_units.remove(unit_id)
+                        previous_pos.pop(unit_id, None)
+                        time.sleep(args.sleep)
+                        steps += 1
+                        acted_this_turn = True
+                        continue
+                else:
+                    # Ensure research is explicitly set (override client auto if needed).
+                    if owned_cities:
+                        set_research_to_target(client, player_id, research_flags=snapshot.research_flags)
+                    # Queue production whenever needed (initially or after tech changes).
+                    for cid, _cx, _cy in owned_cities:
+                        if cid in queued_city_production:
+                            continue
+                        queued = queue_city_production(
+                            client,
+                            cid,
+                            snapshot.research_flags,
+                            unit_values,
+                            controlled_units=controlled_units,
+                            unit_type_labels=unit_type_labels,
+                        )
+                        print(f"[step {steps}] queued production in city {cid} success={queued}")
+                        if queued:
+                            queued_city_production.add(cid)
+
+                # Attempt to attack immediately if an enemy unit is adjacent.
+                px, py = snapshot.player_pos
+                enemy_targets: List[Tuple[int, int, int]] = []
+                for idx, (nx, ny) in enumerate(movement.get_native_neighbors(px, py)):
+                    if nx is None or ny is None:
+                        continue
+                    status = snapshot.status_lookup.get((nx, ny))
+                    if not status:
+                        continue
+                    _au_char, enemy_flag, enemy_units, friendly_units, *_rest = status
+                    # Enemy present (unit or city) and no friendly stack blocking.
+                    if (enemy_flag or enemy_units) and not friendly_units:
+                        enemy_targets.append((idx, nx, ny))
+
+                # Force an attack if any adjacent enemy is present to concentrate fire.
+                if enemy_targets:
+                    idx, nx, ny = enemy_targets[0]
+                    enemy_val = enemy_strengths.get((nx, ny), 0.0)
+                    self_val = unit_strengths.get(unit_type_labels.get(unit_id, ""), 0.0)
+                    # Cities usually aren't in the strength map; treat enemy_val<=0 as city/unknown and attack.
+                    if enemy_val <= 0 or self_val >= enemy_val * 0.9:
+                        success = client.attack_target(unit_id, nx, ny)
+                        print(
+                            f"[step {steps}] unit={unit_desc} attack target=({nx},{ny}) dir_idx={idx} "
+                            f"strength_self={self_val:.2f} enemy={enemy_val:.2f} success={success}"
+                        )
+                    else:
+                        success = False
+                        print(
+                            f"[step {steps}] unit={unit_desc} skip attack; enemy stronger "
+                            f"(self={self_val:.2f} enemy={enemy_val:.2f})"
+                        )
+                    print(
+                        f"[step {steps}] unit={unit_desc} attack target=({nx},{ny}) dir_idx={idx} success={success}"
+                    )
+                    previous_pos[unit_id] = snapshot.player_pos
                     time.sleep(args.sleep)
                     steps += 1
                     acted_this_turn = True
                     continue
-            else:
-                # Ensure research is explicitly set (override client auto if needed).
-                if owned_cities:
-                    set_research_to_target(client, player_id, research_flags=snapshot.research_flags)
-                # Queue production whenever needed (initially or after tech changes).
-                for cid, _cx, _cy in owned_cities:
-                    if cid in queued_city_production:
-                        continue
-                    queued = queue_city_production(
-                        client,
-                        cid,
-                        snapshot.research_flags,
-                        unit_values,
-                        controlled_units=controlled_units,
-                        unit_type_labels=unit_type_labels,
-                    )
-                    print(f"[step {steps}] queued production in city {cid} success={queued}")
-                    if queued:
-                        queued_city_production.add(cid)
 
-            # Attempt to attack immediately if an enemy unit is adjacent.
-            px, py = snapshot.player_pos
-            enemy_targets: List[Tuple[int, int, int]] = []
-            for idx, (nx, ny) in enumerate(movement.get_native_neighbors(px, py)):
-                if nx is None or ny is None:
-                    continue
-                status = snapshot.status_lookup.get((nx, ny))
-                if not status:
-                    continue
-                _au_char, enemy_flag, enemy_units, friendly_units, *_rest = status
-                # Enemy present (unit or city) and no friendly stack blocking.
-                if (enemy_flag or enemy_units) and not friendly_units:
-                    enemy_targets.append((idx, nx, ny))
-
-            # Force an attack if any adjacent enemy is present to concentrate fire.
-            if enemy_targets:
-                idx, nx, ny = enemy_targets[0]
-                enemy_val = enemy_strengths.get((nx, ny), 0.0)
-                self_val = unit_strengths.get(unit_type_labels.get(unit_id, ""), 0.0)
-                # Cities usually aren't in the strength map; treat enemy_val<=0 as city/unknown and attack.
-                if enemy_val <= 0 or self_val >= enemy_val * 0.9:
-                    success = client.attack_target(unit_id, nx, ny)
-                    print(
-                        f"[step {steps}] unit={unit_desc} attack target=({nx},{ny}) dir_idx={idx} "
-                        f"strength_self={self_val:.2f} enemy={enemy_val:.2f} success={success}"
-                    )
-                else:
-                    success = False
-                    print(
-                        f"[step {steps}] unit={unit_desc} skip attack; enemy stronger "
-                        f"(self={self_val:.2f} enemy={enemy_val:.2f})"
-                    )
-                print(
-                    f"[step {steps}] unit={unit_desc} attack target=({nx},{ny}) dir_idx={idx} success={success}"
+                board_state = build_state(map_cfg, snapshot)
+                canonical = CanonicalBoard(board_state, 1)
+                pi, _value = nnet.predict(canonical)
+                pi = apply_tech_weights(pi, board_state, tech_weights)
+                valid_actions = board_state.valid_moves(1)
+                action = choose_action(
+                    snapshot,
+                    pi,
+                    board_state.ACTION_SIZE + 1,
+                    movement,
+                    visited_tiles,
+                    previous_pos.get(unit_id),
+                    target_coord=known_enemy_target,
+                    valid_actions=valid_actions,
                 )
-                previous_pos[unit_id] = snapshot.player_pos
+
+                if action == board_state.PASS_ACTION:
+                    fallback_dir = fallback_move_direction(
+                        snapshot=snapshot,
+                        movement=movement,
+                        previous_pos=previous_pos.get(unit_id),
+                        dir_ids=dir_ids,
+                        target_coord=known_enemy_target,
+                    )
+                    if fallback_dir is not None:
+                        success = client.move_dir_id(unit_id, fallback_dir)
+                        print(
+                            f"[step {steps}] unit={unit_desc} fallback move dir_id={fallback_dir} success={success}"
+                        )
+                        if success:
+                            previous_pos[unit_id] = snapshot.player_pos
+                        else:
+                            previous_pos[unit_id] = None
+                    else:
+                        print(f"[step {steps}] unit={unit_desc} pass (no valid moves)")
+                        previous_pos[unit_id] = None
+                elif action == board_state.BUILD_CITY_ACTION and is_settler:
+                    city_name = f"AutoCity{len(owned_cities) + 1}"
+                    built = client.found_city(unit_id, city_name)
+                    action_desc = f"founded city '{city_name}'"
+                    if not built:
+                        built = client.build_city(unit_id)
+                        action_desc = "built a city"
+                    print(f"[step {steps}] unit={unit_desc} {action_desc} success={built}")
+                    if built:
+                        owned_cities = discover_player_cities(client, player_id)
+                        controlled_units.remove(unit_id)
+                        previous_pos.pop(unit_id, None)
+                elif action == board_state.BUILD_CITY_ACTION and not is_settler:
+                    # Treat bad build choice as a move attempt to avoid idling.
+                    fallback_dir = fallback_move_direction(
+                        snapshot=snapshot,
+                        movement=movement,
+                        previous_pos=previous_pos.get(unit_id),
+                        dir_ids=dir_ids,
+                    )
+                    if fallback_dir is not None:
+                        success = client.move_dir_id(unit_id, fallback_dir)
+                        print(
+                            f"[step {steps}] unit={unit_desc} fallback-from-build move dir_id={fallback_dir} success={success}"
+                        )
+                        if success:
+                            previous_pos[unit_id] = snapshot.player_pos
+                        else:
+                            previous_pos[unit_id] = None
+                    else:
+                        print(f"[step {steps}] unit={unit_desc} skip build (not a settler)")
+                        previous_pos[unit_id] = None
+                elif board_state.RESEARCH_ACTION_BASE <= action < board_state.RESEARCH_ACTION_BASE + board_state.RESEARCH_ACTION_COUNT:
+                    tech_idx = action - board_state.RESEARCH_ACTION_BASE
+                    tech_name = board_state.RESEARCH_TECHS[tech_idx]
+                    if not owned_cities:
+                        print(
+                            f"[step {steps}] unit={unit_desc} requested research {tech_name} but no city exists; skipping"
+                        )
+                        success = False
+                    else:
+                        success = set_research_to_target(
+                            client,
+                            player_id,
+                            research_flags=snapshot.research_flags,
+                            tech_name=tech_name,
+                        )
+                        print(
+                            f"[step {steps}] unit={unit_desc} set research tech={tech_name} success={success}"
+                        )
+                    previous_pos[unit_id] = None
+                elif 0 <= action < len(dir_ids):
+                    dir_id = dir_ids[action]
+                    success = client.move_dir_id(unit_id, dir_id)
+                    print(f"[step {steps}] unit={unit_desc} move dir_id={dir_id} success={success}")
+                    previous_pos[unit_id] = snapshot.player_pos
+                else:
+                    print(f"[step {steps}] unit={unit_desc} unsupported action={action}; skipping")
+                    previous_pos[unit_id] = None
                 time.sleep(args.sleep)
                 steps += 1
                 acted_this_turn = True
-                continue
 
-            board_state = build_state(map_cfg, snapshot)
-            canonical = CanonicalBoard(board_state, 1)
-            pi, _value = nnet.predict(canonical)
-            pi = apply_tech_weights(pi, board_state, tech_weights)
-            valid_actions = board_state.valid_moves(1)
-            action = choose_action(
-                snapshot,
-                pi,
-                board_state.ACTION_SIZE + 1,
-                movement,
-                visited_tiles,
-                previous_pos.get(unit_id),
-                target_coord=known_enemy_target,
-                valid_actions=valid_actions,
-            )
+            client.end_turn()
+            turns += 1
+            if not acted_this_turn:
+                time.sleep(args.sleep)
 
-            if action == board_state.PASS_ACTION:
-                fallback_dir = fallback_move_direction(
-                    snapshot=snapshot,
-                    movement=movement,
-                    previous_pos=previous_pos.get(unit_id),
-                    dir_ids=dir_ids,
-                    target_coord=known_enemy_target,
-                )
-                if fallback_dir is not None:
-                    success = client.move_dir_id(unit_id, fallback_dir)
-                    print(
-                        f"[step {steps}] unit={unit_desc} fallback move dir_id={fallback_dir} success={success}"
-                    )
-                    if success:
-                        previous_pos[unit_id] = snapshot.player_pos
-                    else:
-                        previous_pos[unit_id] = None
-                else:
-                    print(f"[step {steps}] unit={unit_desc} pass (no valid moves)")
-                    previous_pos[unit_id] = None
-            elif action == board_state.BUILD_CITY_ACTION and is_settler:
-                city_name = f"AutoCity{len(owned_cities) + 1}"
-                built = client.found_city(unit_id, city_name)
-                action_desc = f"founded city '{city_name}'"
-                if not built:
-                    built = client.build_city(unit_id)
-                    action_desc = "built a city"
-                print(f"[step {steps}] unit={unit_desc} {action_desc} success={built}")
-                if built:
-                    owned_cities = discover_player_cities(client, player_id)
-                    controlled_units.remove(unit_id)
-                    previous_pos.pop(unit_id, None)
-            elif action == board_state.BUILD_CITY_ACTION and not is_settler:
-                # Treat bad build choice as a move attempt to avoid idling.
-                fallback_dir = fallback_move_direction(
-                    snapshot=snapshot,
-                    movement=movement,
-                    previous_pos=previous_pos.get(unit_id),
-                    dir_ids=dir_ids,
-                )
-                if fallback_dir is not None:
-                    success = client.move_dir_id(unit_id, fallback_dir)
-                    print(
-                        f"[step {steps}] unit={unit_desc} fallback-from-build move dir_id={fallback_dir} success={success}"
-                    )
-                    if success:
-                        previous_pos[unit_id] = snapshot.player_pos
-                    else:
-                        previous_pos[unit_id] = None
-                else:
-                    print(f"[step {steps}] unit={unit_desc} skip build (not a settler)")
-                    previous_pos[unit_id] = None
-            elif board_state.RESEARCH_ACTION_BASE <= action < board_state.RESEARCH_ACTION_BASE + board_state.RESEARCH_ACTION_COUNT:
-                tech_idx = action - board_state.RESEARCH_ACTION_BASE
-                tech_name = board_state.RESEARCH_TECHS[tech_idx]
-                if not owned_cities:
-                    print(
-                        f"[step {steps}] unit={unit_desc} requested research {tech_name} but no city exists; skipping"
-                    )
-                    success = False
-                else:
-                    success = set_research_to_target(client, player_id, research_flags=snapshot.research_flags, tech_name=tech_name)
-                    print(
-                        f"[step {steps}] unit={unit_desc} set research tech={tech_name} success={success}"
-                    )
-                previous_pos[unit_id] = None
-            elif 0 <= action < len(dir_ids):
-                dir_id = dir_ids[action]
-                success = client.move_dir_id(unit_id, dir_id)
-                print(f"[step {steps}] unit={unit_desc} move dir_id={dir_id} success={success}")
-                previous_pos[unit_id] = snapshot.player_pos
-            else:
-                print(f"[step {steps}] unit={unit_desc} unsupported action={action}; skipping")
-                previous_pos[unit_id] = None
-            time.sleep(args.sleep)
-            steps += 1
-            acted_this_turn = True
-
-        client.end_turn()
-        turns += 1
-        if not acted_this_turn:
-            time.sleep(args.sleep)
-
-        if player_id is not None:
-            latest_units, player_id = discover_controlled_units(client, player_id)
-            for uid in latest_units:
-                if uid not in controlled_units:
-                    controlled_units.append(uid)
-                    previous_pos[uid] = None
-            for uid in list(controlled_units):
-                if uid not in latest_units:
-                    controlled_units.remove(uid)
-                    previous_pos.pop(uid, None)
-        owned_cities = discover_player_cities(client, player_id)
-        if owned_cities:
+            if player_id is not None:
+                latest_units, player_id = discover_controlled_units(client, player_id)
+                for uid in latest_units:
+                    if uid not in controlled_units:
+                        controlled_units.append(uid)
+                        previous_pos[uid] = None
+                for uid in list(controlled_units):
+                    if uid not in latest_units:
+                        controlled_units.remove(uid)
+                        previous_pos.pop(uid, None)
+            owned_cities = discover_player_cities(client, player_id)
+            if owned_cities:
                 for cid, _cx, _cy in owned_cities:
                     if cid in queued_city_production:
                         continue
@@ -1589,10 +1713,18 @@ def main() -> None:
                     if queued:
                         queued_city_production.add(cid)
 
-    if not controlled_units:
-        print(f"No active units remain after {steps} steps ({turns} turns); exiting.")
-    else:
-        print(f"Completed {steps} steps across {turns} turns; exiting.")
+        if not controlled_units:
+            print(f"No active units remain after {steps} steps ({turns} turns); exiting.")
+        else:
+            print(f"Completed {steps} steps across {turns} turns; exiting.")
+    finally:
+        if client is not None:
+            try:
+                client.close()
+            except Exception:
+                pass
+        if client_process is not None:
+            _stop_client_process(client_process)
 
 
 if __name__ == "__main__":
