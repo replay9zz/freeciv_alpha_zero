@@ -357,6 +357,23 @@ def _resolve_score_log_path(path_str: Optional[str]) -> Optional[Path]:
     return path
 
 
+def _format_checkpoint_path(checkpoint_path: Path) -> str:
+    try:
+        resolved = checkpoint_path.resolve()
+        home = Path.home().resolve()
+        if resolved == home or home in resolved.parents:
+            return f"~/{resolved.relative_to(home)}"
+        return str(resolved)
+    except OSError:
+        return str(checkpoint_path)
+
+
+def _write_checkpoint_file(output_dir: Path, checkpoint_path: Path) -> None:
+    output_dir.mkdir(parents=True, exist_ok=True)
+    display_path = _format_checkpoint_path(checkpoint_path)
+    (output_dir / "CHECKPOINT").write_text(f"{display_path}\n", encoding="utf-8")
+
+
 def set_research_to_target(
     client: LuaRemoteClient,
     player_id: Optional[int],
@@ -1342,6 +1359,9 @@ def main() -> None:
     checkpoint_path = Path(args.checkpoint).expanduser()
     if not checkpoint_path.exists():
         raise SystemExit(f"Checkpoint file {checkpoint_path} not found.")
+    if args.score_log:
+        score_log_path = Path(args.score_log).expanduser()
+        _write_checkpoint_file(score_log_path.parent, checkpoint_path)
 
     dir_ids = parse_dir_ids(args.dir_ids)
     tech_weights = parse_tech_weights(args.tech_weight)
