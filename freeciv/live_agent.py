@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import argparse
+import csv
 import json
 import os
 import random
@@ -355,6 +356,28 @@ def _resolve_score_log_path(path_str: Optional[str]) -> Optional[Path]:
     path = Path(path_str).expanduser()
     path.parent.mkdir(parents=True, exist_ok=True)
     return path
+
+
+def _open_turn_score_csv(
+    path_str: Optional[str],
+    checkpoint_path: Optional[Path],
+) -> tuple[Optional[csv.writer], Optional[object]]:
+    if not path_str:
+        return None, None
+    path = Path(path_str).expanduser()
+    path.parent.mkdir(parents=True, exist_ok=True)
+    if checkpoint_path is not None:
+        _write_checkpoint_file(path.parent, checkpoint_path)
+    file_exists = path.exists()
+    fp = path.open("a", newline="", encoding="utf-8")
+    writer = csv.writer(fp)
+    try:
+        if not file_exists or path.stat().st_size == 0:
+            writer.writerow(["episode", "turn", "player0_score", "player1_score"])
+            fp.flush()
+    except OSError:
+        pass
+    return writer, fp
 
 
 def _format_checkpoint_path(checkpoint_path: Path) -> str:
@@ -804,6 +827,8 @@ def run_multihead_agent(
     known_tiles: Dict[Tuple[int, int], str],
     known_enemy: Dict[Tuple[int, int], bool],
     visited_tiles: Set[Tuple[int, int]],
+    turn_score_writer: Optional[csv.writer],
+    turn_score_fp,
 ) -> None:
     steps = 0
     turns = 0
@@ -812,6 +837,7 @@ def run_multihead_agent(
     score_log_path = _resolve_score_log_path(getattr(args, "score_log", None))
     score_log_interval = int(getattr(args, "score_log_interval", 0) or 0)
     autosettler_units: Set[int] = set()
+    last_turn_csv = None
 
     def _maybe_log_scores(turn: int) -> None:
         if score_log_path is None or score_log_interval <= 0:
@@ -828,6 +854,23 @@ def run_multihead_agent(
         }
         with score_log_path.open("a", encoding="utf-8") as handle:
             handle.write(json.dumps(payload) + "\n")
+
+    def _maybe_log_turn_csv(turn: int) -> None:
+        nonlocal last_turn_csv
+        if turn_score_writer is None:
+            return
+        if turn <= 0 or turn == last_turn_csv:
+            return
+        try:
+            scores = list_player_scores(client)
+        except Exception:
+            return
+        p0 = scores.get(0, (None, None, ""))[0]
+        p1 = scores.get(1, (None, None, ""))[0]
+        turn_score_writer.writerow([1, turn, p0, p1])
+        if turn_score_fp is not None:
+            turn_score_fp.flush()
+        last_turn_csv = turn
 
     def can_research_now(tech_name: str, flags: Dict[str, bool]) -> bool:
         """
@@ -1302,6 +1345,7 @@ def run_multihead_agent(
         client.end_turn()
         turns += 1
         _maybe_log_scores(turns)
+        _maybe_log_turn_csv(turns)
 
     print(f"Completed {steps} steps across {turns} turns; exiting.")
 
@@ -1326,6 +1370,11 @@ def main() -> None:
     ap.add_argument('--max-steps', type=int, default=800)
     ap.add_argument('--score-log', default=None, help='Write civ scores to JSONL every N turns.')
     ap.add_argument('--score-log-interval', type=int, default=25)
+    ap.add_argument(
+        '--turn-score-csv',
+        default=None,
+        help='Write per-turn civ scores to CSV (episode,turn,player0_score,player1_score).',
+    )
     ap.add_argument(
         '--client-cmd',
         help="Optional command to launch a Freeciv client (headless or GUI).",
@@ -1362,6 +1411,13 @@ def main() -> None:
     if args.score_log:
         score_log_path = Path(args.score_log).expanduser()
         _write_checkpoint_file(score_log_path.parent, checkpoint_path)
+    turn_score_writer = None
+    turn_score_fp = None
+    if args.turn_score_csv:
+        turn_score_writer, turn_score_fp = _open_turn_score_csv(
+            args.turn_score_csv,
+            checkpoint_path,
+        )
 
     dir_ids = parse_dir_ids(args.dir_ids)
     tech_weights = parse_tech_weights(args.tech_weight)
@@ -1452,9 +1508,12 @@ def main() -> None:
                 known_tiles=known_tiles,
                 known_enemy=known_enemy,
                 visited_tiles=visited_tiles,
+                turn_score_writer=turn_score_writer,
+                turn_score_fp=turn_score_fp,
             )
             return
 
+        last_turn_csv = None
         while steps < args.max_steps:
             try:
                 unit_type_labels = list_all_unit_types(client)
@@ -1705,6 +1764,18 @@ def main() -> None:
             turns += 1
             if not acted_this_turn:
                 time.sleep(args.sleep)
+            if turn_score_writer is not None and turns > 0 and turns != last_turn_csv:
+                try:
+                    scores = list_player_scores(client)
+                except Exception:
+                    scores = None
+                if scores is not None:
+                    p0 = scores.get(0, (None, None, ""))[0]
+                    p1 = scores.get(1, (None, None, ""))[0]
+                    turn_score_writer.writerow([1, turns, p0, p1])
+                    if turn_score_fp is not None:
+                        turn_score_fp.flush()
+                    last_turn_csv = turns
 
             if player_id is not None:
                 latest_units, player_id = discover_controlled_units(client, player_id)
@@ -1745,6 +1816,8 @@ def main() -> None:
                 pass
         if client_process is not None:
             _stop_client_process(client_process)
+        if turn_score_fp is not None:
+            turn_score_fp.close()
 
 
 if __name__ == "__main__":
