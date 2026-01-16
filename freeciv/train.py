@@ -176,9 +176,15 @@ def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="AlphaZero training harness for Freeciv board abstraction")
     parser.add_argument('--map-width', type=int, default=9)
     parser.add_argument('--map-height', type=int, default=9)
-    parser.add_argument('--max-turns', type=int, default=64, help='Max steps per episode (alias: --max-moves)')
+    parser.add_argument('--max-turns', type=int, default=64, help='Max turns per episode (alias: --max-moves)')
     parser.add_argument('--max-steps', type=int, default=None, help='Alias for --max-turns')
     parser.add_argument('--max-moves', type=int, default=None, help='Alias for --max-turns')
+    parser.add_argument(
+        '--max-actions-per-turn',
+        type=int,
+        default=None,
+        help='Max actions per turn (default: max_units*2)',
+    )
     parser.add_argument('--num-iters', type=int, default=2)
     parser.add_argument('--num-eps', type=int, default=10, help='Self-play episodes per iteration')
     parser.add_argument('--num-mcts-sims', type=int, default=64)
@@ -215,7 +221,12 @@ def main():
         args.checkpoint = str(_default_checkpoint_dir())
     args.tensorboard_dir = args.checkpoint
     logging.info("Starting training with args: %s", args)
-    map_cfg = MapConfig(map_w=args.map_width, map_h=args.map_height, max_turns=args.max_turns)
+    map_cfg = MapConfig(
+        map_w=args.map_width,
+        map_h=args.map_height,
+        max_turns=args.max_turns,
+        max_actions_per_turn=args.max_actions_per_turn or 0,
+    )
     # Build research rewards from civ2civ3 ruleset unlock values.
     try:
         unlock_path = Path(__file__).resolve().parent / "data" / "tech_unlocks.yaml"

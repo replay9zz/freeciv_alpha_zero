@@ -1363,11 +1363,17 @@ def main() -> None:
     ap.add_argument('--map-width', type=int, default=9)
     ap.add_argument('--map-height', type=int, default=9)
     ap.add_argument('--max-turns', type=int, default=64)
+    ap.add_argument(
+        '--max-actions-per-turn',
+        type=int,
+        default=None,
+        help='Max actions per turn (default: max_units*2)',
+    )
     # Default hex dir ids align with the mapping used in freeciv_rl.run_model_agent:
     # [N, NE, SE, S, SW, NW] -> [0, 1, 4, 7, 6, 3]
     ap.add_argument('--dir-ids', default='0,1,4,7,6,3')
     ap.add_argument('--sleep', type=float, default=0.1)
-    ap.add_argument('--max-steps', type=int, default=800)
+    ap.add_argument('--max-steps', type=int, default=None)
     ap.add_argument('--score-log', default=None, help='Write civ scores to JSONL every N turns.')
     ap.add_argument('--score-log-interval', type=int, default=25)
     ap.add_argument(
@@ -1421,7 +1427,18 @@ def main() -> None:
 
     dir_ids = parse_dir_ids(args.dir_ids)
     tech_weights = parse_tech_weights(args.tech_weight)
-    map_cfg = MapConfig(map_w=args.map_width, map_h=args.map_height, max_turns=args.max_turns)
+    max_actions_per_turn = args.max_actions_per_turn or 0
+    map_cfg = MapConfig(
+        map_w=args.map_width,
+        map_h=args.map_height,
+        max_turns=args.max_turns,
+        max_actions_per_turn=max_actions_per_turn,
+    )
+    if args.max_steps is None:
+        if max_actions_per_turn > 0:
+            args.max_steps = args.max_turns * max_actions_per_turn
+        else:
+            args.max_steps = args.max_turns * max(1, args.max_units * 2)
     game: MultiheadGame | None = None
     if args.mode == "multihead":
         game, nnet = load_network_multihead(checkpoint_path, map_cfg, max_units=args.max_units)

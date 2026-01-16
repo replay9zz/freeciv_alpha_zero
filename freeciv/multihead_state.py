@@ -236,7 +236,11 @@ class MultiheadState:
         self.ACTION_SIZE = self.MOVE_SIZE + self.ATTACK_SIZE + self.ECON_SIZE
         self.PASS_ACTION = self.ACTION_SIZE - 1  # last index in econ head
         # Allow multiple actions within the same logical turn; cap to avoid stalling.
-        self.max_actions_per_turn = max(1, self.max_units * 2)
+        cfg_max = getattr(self.cfg, "max_actions_per_turn", 0)
+        if cfg_max and cfg_max > 0:
+            self.max_actions_per_turn = int(cfg_max)
+        else:
+            self.max_actions_per_turn = max(1, self.max_units * 2)
         if self.gt is None:
             self.reset()
         if not self.research_done.get(1):
