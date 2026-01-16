@@ -59,6 +59,12 @@ class Coach():
             float(stats.get("total_reward", 0.0)),
             self.live_log_counter,
         )
+        if "muzero_total_reward" in stats:
+            self.tb_writer.add_scalar(
+                "0.Live/MuZero_total_reward",
+                float(stats.get("muzero_total_reward", 0.0)),
+                self.live_log_counter,
+            )
         self.tb_writer.add_scalar(
             "0.Live/Player1_reward",
             float(stats.get("player_rewards", {}).get(1, 0.0)),
@@ -98,6 +104,8 @@ class Coach():
         episodeStep = 0
         total_reward = 0.0
         player_rewards = {1: 0.0, -1: 0.0}
+        muzero_total_reward = 0.0
+        muzero_player_rewards = {1: 0.0, -1: 0.0}
 
         while True:
             episodeStep += 1
@@ -112,11 +120,52 @@ class Coach():
             action = np.random.choice(len(pi), p=pi)
             prev_scores = dict(board.scores) if hasattr(board, "scores") else None
             acting_player = self.curPlayer
+            prev_civ_score = None
+            if hasattr(board, "civilization_score"):
+                try:
+                    prev_civ_score = float(board.civilization_score(acting_player))
+                except Exception:
+                    prev_civ_score = None
+            prev_visited = None
+            if hasattr(board, "visited"):
+                try:
+                    visited = board.visited.get(acting_player)
+                    if visited is not None:
+                        prev_visited = int(visited.sum())
+                except Exception:
+                    prev_visited = None
+            move_reward = None
+            if hasattr(board, "cfg"):
+                try:
+                    move_reward = float(getattr(board.cfg, "move_reward", 0.0))
+                except Exception:
+                    move_reward = None
             board, self.curPlayer = self.game.getNextState(board, self.curPlayer, action)
             if prev_scores is not None and hasattr(board, "scores"):
                 delta = board.scores.get(acting_player, 0.0) - prev_scores.get(acting_player, 0.0)
                 player_rewards[acting_player] += float(delta)
                 total_reward += float(delta)
+            muzero_delta = None
+            if prev_civ_score is not None and hasattr(board, "civilization_score"):
+                try:
+                    next_civ_score = float(board.civilization_score(acting_player))
+                    muzero_delta = next_civ_score - prev_civ_score
+                    if (
+                        move_reward is not None
+                        and prev_visited is not None
+                        and hasattr(board, "visited")
+                    ):
+                        visited = board.visited.get(acting_player)
+                        if visited is not None:
+                            next_visited = int(visited.sum())
+                            muzero_delta += (next_visited - prev_visited) * move_reward
+                except Exception:
+                    muzero_delta = None
+            if muzero_delta is None and prev_scores is not None and hasattr(board, "scores"):
+                muzero_delta = board.scores.get(acting_player, 0.0) - prev_scores.get(acting_player, 0.0)
+            if muzero_delta is not None:
+                muzero_total_reward += float(muzero_delta)
+                muzero_player_rewards[acting_player] += float(muzero_delta)
 
             self._log_live_stats()
             r = self.game.getGameEnded(board, self.curPlayer)
@@ -126,6 +175,8 @@ class Coach():
                     "total_reward": total_reward,
                     "player_rewards": player_rewards,
                     "episode_length": episodeStep,
+                    "muzero_total_reward": muzero_total_reward,
+                    "muzero_player_rewards": muzero_player_rewards,
                 }
                 examples = [
                     (x[0], x[2], r * ((-1) ** (x[1] != self.curPlayer)))
@@ -152,6 +203,9 @@ class Coach():
                 total_rewards = []
                 player1_rewards = []
                 player2_rewards = []
+                muzero_total_rewards = []
+                muzero_player1_rewards = []
+                muzero_player2_rewards = []
                 episode_lengths = []
                 for _ in tqdm(range(self.args.numEps), desc="Self Play"):
                     self.mcts = MCTS(self.game, self.nnet, self.args)  # reset search tree
@@ -160,6 +214,9 @@ class Coach():
                     total_rewards.append(stats["total_reward"])
                     player1_rewards.append(stats["player_rewards"].get(1, 0.0))
                     player2_rewards.append(stats["player_rewards"].get(-1, 0.0))
+                    muzero_total_rewards.append(stats.get("muzero_total_reward", 0.0))
+                    muzero_player1_rewards.append(stats.get("muzero_player_rewards", {}).get(1, 0.0))
+                    muzero_player2_rewards.append(stats.get("muzero_player_rewards", {}).get(-1, 0.0))
                     episode_lengths.append(stats["episode_length"])
                     self.live_log_stats = stats
                     self._log_live_stats(force=True)
@@ -170,6 +227,12 @@ class Coach():
                             float(stats["total_reward"]),
                             self.selfplay_episode,
                         )
+                        if "muzero_total_reward" in stats:
+                            self.tb_writer.add_scalar(
+                                "0.Episode/MuZero_total_reward",
+                                float(stats.get("muzero_total_reward", 0.0)),
+                                self.selfplay_episode,
+                            )
                         self.tb_writer.add_scalar(
                             "0.Episode/Player1_reward",
                             float(stats["player_rewards"].get(1, 0.0)),
@@ -195,6 +258,19 @@ class Coach():
                     self.tb_writer.add_scalar("1.Total_reward/3.Episode_length", mean_len, i)
                     self.tb_writer.add_scalar("1.Total_reward/4.Player1_reward", mean_p1, i)
                     self.tb_writer.add_scalar("1.Total_reward/5.Player2_reward", mean_p2, i)
+                    if muzero_total_rewards:
+                        mean_muzero_total = float(np.mean(muzero_total_rewards))
+                        mean_muzero_p1 = float(np.mean(muzero_player1_rewards))
+                        mean_muzero_p2 = float(np.mean(muzero_player2_rewards))
+                        self.tb_writer.add_scalar(
+                            "1.Total_reward/6.MuZero_total_reward", mean_muzero_total, i
+                        )
+                        self.tb_writer.add_scalar(
+                            "1.Total_reward/7.MuZero_player1_reward", mean_muzero_p1, i
+                        )
+                        self.tb_writer.add_scalar(
+                            "1.Total_reward/8.MuZero_player2_reward", mean_muzero_p2, i
+                        )
                     self.tb_writer.flush()
 
                 # save the iteration examples to the history 
