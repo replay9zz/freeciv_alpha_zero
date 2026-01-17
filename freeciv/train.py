@@ -196,6 +196,11 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument('--stats-path', default=None)
     parser.add_argument('--mode', choices=['default', 'combat', 'multihead'], default='multihead', help='Training environment')
     parser.add_argument('--max-units', type=int, default=6, help='Max units per side for multihead mode')
+    parser.add_argument(
+        '--no-sea-units',
+        action='store_true',
+        help='Disable naval unit production for maps without sea.',
+    )
     return parser.parse_args()
 
 
@@ -226,6 +231,7 @@ def main():
         map_h=args.map_height,
         max_turns=args.max_turns,
         max_actions_per_turn=args.max_actions_per_turn or 0,
+        allow_sea_units=not args.no_sea_units,
     )
     # Build research rewards from civ2civ3 ruleset unlock values.
     try:

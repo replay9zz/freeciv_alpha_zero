@@ -70,6 +70,7 @@ from freeciv_alpha_zero.freeciv.multihead_game import MultiheadGame
 from freeciv_alpha_zero.freeciv.multihead_state import MHUnit, MultiheadState
 from freeciv_alpha_zero.freeciv.nnet import NNetWrapper
 from freeciv_alpha_zero.freeciv.providers import GroundTruth
+from freeciv_alpha_zero.freeciv.ruleset_loader import load_civ2civ3_ruleset
 from freeciv_alpha_zero.freeciv.state import FreecivBoardState
 from freeciv_alpha_zero.freeciv.research_policy import (
     TARGET_TECH_NAME,
@@ -85,6 +86,22 @@ from freeciv_alpha_zero.freeciv.explore_policy import (
 
 # Units we want to avoid auto-producing even if unlocked (tempo killers).
 EXCLUDED_PRODUCTION_UNITS = {"Migrants"}
+SEA_UNIT_CLASSES = {"sea", "trireme"}
+
+
+def _load_sea_unit_names() -> Set[str]:
+    try:
+        ruleset = load_civ2civ3_ruleset()
+    except Exception:
+        return set()
+    return {
+        unit.name
+        for unit in ruleset.units
+        if (unit.unit_class or "").lower() in SEA_UNIT_CLASSES
+    }
+
+
+SEA_UNIT_NAMES = _load_sea_unit_names()
 
 def get_unit_rule_name(client: LuaRemoteClient, unit_id: int) -> Optional[str]:
     """
@@ -269,7 +286,12 @@ def load_unit_values(path: str) -> Dict[str, Tuple[str, float]]:
     return out
 
 
-def pick_production_target(research_flags: Dict[str, bool], unit_values: Dict[str, Tuple[str, float]]) -> str:
+def pick_production_target(
+    research_flags: Dict[str, bool],
+    unit_values: Dict[str, Tuple[str, float]],
+    *,
+    allow_sea_units: bool = True,
+) -> str:
     """
     Choose the highest-value unlocked unit given known techs.
     Falls back to Warriors if nothing else is unlocked.
@@ -278,6 +300,8 @@ def pick_production_target(research_flags: Dict[str, bool], unit_values: Dict[st
     best_val = -1.0
     for name, (req_tech, val) in unit_values.items():
         if name in EXCLUDED_PRODUCTION_UNITS:
+            continue
+        if not allow_sea_units and name in SEA_UNIT_NAMES:
             continue
         if req_tech and not research_flags.get(req_tech, False):
             continue
@@ -294,12 +318,17 @@ def queue_city_production(
     unit_values: Optional[Dict[str, Tuple[str, float]]] = None,
     controlled_units: Optional[List[int]] = None,
     unit_type_labels: Optional[Dict[int, str]] = None,
+    allow_sea_units: bool = True,
 ) -> bool:
     """
     Set production to the best unlocked unit (prefers stronger tech-gated units).
     """
     unit_values = unit_values or {}
-    target_name = pick_production_target(research_flags, unit_values)
+    target_name = pick_production_target(
+        research_flags,
+        unit_values,
+        allow_sea_units=allow_sea_units,
+    )
     if unit_values:
         req = unit_values.get(target_name, ("", 0.0))[0]
         unlocked = True if not req else research_flags.get(req, False)
@@ -919,6 +948,7 @@ def run_multihead_agent(
                         unit_values=unit_values,
                         controlled_units=controlled_units,
                         unit_type_labels=unit_type_labels,
+                        allow_sea_units=map_cfg.allow_sea_units,
                     )
                     print(f"[production] city={cid} queued={queued}")
                     if queued:
@@ -965,6 +995,7 @@ def run_multihead_agent(
                 unit_values=unit_values,
                 controlled_units=controlled_units,
                 unit_type_labels=unit_type_labels,
+                allow_sea_units=map_cfg.allow_sea_units,
             )
             print(f"[production] city={cid} queued={queued}")
             if queued:
@@ -1369,6 +1400,11 @@ def main() -> None:
         default=None,
         help='Max actions per turn (default: max_units*2)',
     )
+    ap.add_argument(
+        '--no-sea-units',
+        action='store_true',
+        help='Disable naval unit production for maps without sea.',
+    )
     # Default hex dir ids align with the mapping used in freeciv_rl.run_model_agent:
     # [N, NE, SE, S, SW, NW] -> [0, 1, 4, 7, 6, 3]
     ap.add_argument('--dir-ids', default='0,1,4,7,6,3')
@@ -1433,6 +1469,7 @@ def main() -> None:
         map_h=args.map_height,
         max_turns=args.max_turns,
         max_actions_per_turn=max_actions_per_turn,
+        allow_sea_units=not args.no_sea_units,
     )
     if args.max_steps is None:
         if max_actions_per_turn > 0:
@@ -1632,6 +1669,7 @@ def main() -> None:
                             unit_values,
                             controlled_units=controlled_units,
                             unit_type_labels=unit_type_labels,
+                            allow_sea_units=map_cfg.allow_sea_units,
                         )
                         print(f"[step {steps}] queued production in city {cid} success={queued}")
                         if queued:
@@ -1816,6 +1854,7 @@ def main() -> None:
                         unit_values=unit_values,
                         controlled_units=controlled_units,
                         unit_type_labels=unit_type_labels,
+                        allow_sea_units=map_cfg.allow_sea_units,
                     )
                     print(f"[turn {turns}] queued production in city {cid} success={queued}")
                     if queued:

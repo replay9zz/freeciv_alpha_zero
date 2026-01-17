@@ -30,6 +30,7 @@ Coord = Tuple[int, int]
 @dataclass
 class UnitSpec:
     name: str
+    unit_class: str
     atk: int
     df: int
     hp: int
@@ -93,10 +94,12 @@ PRODUCTION_ITEM_NAMES: Tuple[Tuple[str, str], ...] = tuple(
 UNIT_SPECS: Dict[str, UnitSpec] = {}
 UNIT_TECHS: Dict[str, List[str]] = {}
 UNIT_OBSOLETE_BY: Dict[str, Optional[str]] = {}
+SEA_UNIT_CLASSES = {"sea", "trireme"}
 for rule in _RULESET.units:
     can_build = "Cities" in rule.flags
     UNIT_SPECS[rule.name] = UnitSpec(
         name=rule.name,
+        unit_class=rule.unit_class,
         atk=rule.attack,
         df=rule.defense,
         hp=rule.hp,
@@ -692,9 +695,12 @@ class MultiheadState:
                     queue_limit = getattr(self.cfg, "production_queue_max", 0)
                     queue_add = max(1, int(getattr(self.cfg, "production_queue_add", 1)))
                     add_count = 1 if kind == "building" else queue_add
+                    skip_unit = False
                     if kind == "unit":
                         name = self._upgrade_unit_name(player, name)
-                    if city.production_target:
+                        if self._unit_is_excluded(name):
+                            skip_unit = True
+                    if not skip_unit and city.production_target:
                         if kind == "building":
                             if (
                                 city.production_kind == "building"
@@ -714,7 +720,7 @@ class MultiheadState:
                                 if queue_limit > 0 and len(city.production_queue) >= queue_limit:
                                     break
                                 city.production_queue.append((kind, name))
-                    else:
+                    elif not skip_unit:
                         if kind == "unit":
                             if self._unit_unlocked(player, name):
                                 city.production_kind = "unit"
@@ -887,7 +893,15 @@ class MultiheadState:
         label = (unit_name or "").lower()
         return any(tag in label for tag in ("worker", "engineer", "migrant"))
 
+    def _unit_is_sea(self, unit_name: str) -> bool:
+        spec = UNIT_SPECS.get(unit_name)
+        if spec is None:
+            return False
+        return spec.unit_class.lower() in SEA_UNIT_CLASSES
+
     def _unit_is_excluded(self, unit_name: str) -> bool:
+        if not getattr(self.cfg, "allow_sea_units", True) and self._unit_is_sea(unit_name):
+            return True
         label = (unit_name or "").lower()
         return any(tag in label for tag in ("diplomat", "explorer"))
 

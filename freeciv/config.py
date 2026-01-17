@@ -56,6 +56,7 @@ class MapConfig:
     food_consumption: int = 2
     food_growth: int = 20
     city_unit_cap: int = 6
+    allow_sea_units: bool = True
     city_size_norm: int = 10
     city_min_distance: int = 3
     # Base defense multiplier for units defending inside a city.

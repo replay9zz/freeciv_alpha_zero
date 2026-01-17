@@ -16,6 +16,7 @@ class TechRule:
 @dataclass(frozen=True)
 class UnitRule:
     name: str
+    unit_class: str
     cost: int
     attack: int
     defense: int
@@ -252,6 +253,9 @@ def load_civ2civ3_units() -> Tuple[UnitRule, ...]:
         )
         if not name:
             continue
+        unit_class = _normalize_name(
+            _extract_first_quoted(str(fields.get("class", "")))
+        )
         flags = _QUOTED_RE.findall(str(fields.get("flags", "")))
         if "NoBuild" in flags:
             continue
@@ -279,6 +283,7 @@ def load_civ2civ3_units() -> Tuple[UnitRule, ...]:
         rules.append(
             UnitRule(
                 name=name,
+                unit_class=unit_class,
                 cost=cost,
                 attack=attack,
                 defense=defense,
@@ -305,6 +310,8 @@ def load_civ2civ3_buildings() -> Tuple[BuildingRule, ...]:
         if not name:
             continue
         genus = _extract_first_quoted(str(fields.get("genus", "")))
+        if genus == "GreatWonder" or name == "Ecclesiastical Palace":
+            continue
         flags = _QUOTED_RE.findall(str(fields.get("flags", "")))
         if genus == "Convert" or "Gold" in flags:
             continue
