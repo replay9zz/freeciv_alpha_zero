@@ -792,6 +792,35 @@ def _connect_with_retry(client: LuaRemoteClient, timeout: float, wait: float) ->
     ) from last_exc
 
 
+def _issue_chat_command(client: LuaRemoteClient, command: str) -> bool:
+    cmd = command.strip()
+    if not cmd:
+        return False
+    if not cmd.startswith("/"):
+        cmd = f"/{cmd}"
+    lua = (
+        "return (function() "
+        f"local cmd={json.dumps(cmd)}; "
+        "local ok=false; "
+        "if type(send_chat)=='function' then ok=pcall(send_chat, cmd) end; "
+        "if (not ok) and chat and type(chat.send)=='function' then ok=pcall(chat.send, cmd) end; "
+        "if (not ok) and client and type(client.send_chat)=='function' then ok=pcall(client.send_chat, cmd) end; "
+        "if (not ok) and client and type(client.chat_send)=='function' then ok=pcall(client.chat_send, cmd) end; "
+        "if (not ok) and client and type(client.chat)=='function' then ok=pcall(client.chat, cmd) end; "
+        "if chat and chat.base then "
+        "  if ok then chat.base('__OK__ take_cmd') else chat.base('__ERR__ take_cmd') end "
+        "end; "
+        "return ok and '__OK__' or '__ERR__' "
+        "end)()"
+    )
+    try:
+        result = client.eval(lua)
+        payload = result.last_return() if result else None
+        return isinstance(payload, str) and payload.startswith("__OK__")
+    except Exception:
+        return False
+
+
 def apply_tech_weights(pi: np.ndarray, board_state: FreecivBoardState, weights: Dict[str, float]) -> np.ndarray:
     """
     Apply optional multiplicative weights to research actions in the policy vector.
@@ -1388,6 +1417,10 @@ def main() -> None:
     ap.add_argument('--timeout', type=float, default=2.5)
     ap.add_argument('--unit-id', type=int, help='Control a single unit id (disables auto-discovery).')
     ap.add_argument('--player-id', type=int, help='Restrict auto-discovery to a specific player id.')
+    ap.add_argument(
+        '--take-player',
+        help='Send /take "<player>" via chat before LuaRemote control (ex: Condor).',
+    )
     ap.add_argument('--checkpoint', required=True)
     ap.add_argument('--mode', choices=['default', 'multihead'], default='default')
     ap.add_argument('--max-units', type=int, default=6, help='Max unit slots for multihead mode')
@@ -1497,6 +1530,11 @@ def main() -> None:
             _connect_with_retry(client, args.client_start_timeout, args.client_start_wait)
         else:
             client.connect()
+
+        if args.take_player:
+            take_cmd = f'/take "{args.take_player}"'
+            if not _issue_chat_command(client, take_cmd):
+                print(f"[warn] failed to send take command: {take_cmd}")
 
         unit_type_labels: Dict[int, str] = {}
         try:
