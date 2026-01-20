@@ -1,6 +1,18 @@
+# Checkpoints
+results/*
+
+# Live Agent
+!results/live_agent
+results/live_agent/*
+*.log
+*.serv
+
+# Play Results
+!results/live_agent/2026-01-19--11-55-01/
+!results/live_agent/2026-01-20--16-37-11/
+
 __pycache__/
 .vscode/
 .idea/
 .DS_Store
 temp/
-results/
