@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import argparse
 import csv
+import datetime
 import json
 import os
 import random
@@ -15,6 +16,7 @@ from typing import Dict, Iterable, List, Optional, Set, Tuple
 
 import numpy as np
 
+REPO_ROOT = Path(__file__).resolve().parents[1]
 try:
     from freeciv_rl.freeciv_luaremote import LuaRemoteClient  # type: ignore
     from freeciv_rl.freeciv_movement import FreecivMovement  # type: ignore
@@ -411,7 +413,13 @@ def _open_turn_score_csv(
 
 def _format_checkpoint_path(checkpoint_path: Path) -> str:
     try:
+        if not checkpoint_path.is_absolute():
+            return str(checkpoint_path)
         resolved = checkpoint_path.resolve()
+        if REPO_ROOT == resolved or REPO_ROOT in resolved.parents:
+            rel = resolved.relative_to(REPO_ROOT)
+            if str(rel) == "results" or str(rel).startswith(f"results{os.sep}"):
+                return str(rel)
         home = Path.home().resolve()
         if resolved == home or home in resolved.parents:
             return f"~/{resolved.relative_to(home)}"
@@ -424,6 +432,19 @@ def _write_checkpoint_file(output_dir: Path, checkpoint_path: Path) -> None:
     output_dir.mkdir(parents=True, exist_ok=True)
     display_path = _format_checkpoint_path(checkpoint_path)
     (output_dir / "CHECKPOINT").write_text(f"{display_path}\n", encoding="utf-8")
+
+
+def _resolve_checkpoint_dir_from_env() -> Optional[Path]:
+    for root_key, run_key in (("LOG_ROOT", "RUN_ID"), ("AZ_LOG_ROOT", "AZ_RUN_ID")):
+        root = os.getenv(root_key)
+        run_id = os.getenv(run_key)
+        if root and run_id:
+            return Path(root).expanduser() / run_id
+    for root_key in ("SERVER_LOG_ROOT", "AZ_SERVER_LOG_ROOT"):
+        root = os.getenv(root_key)
+        if root:
+            return Path(root).expanduser()
+    return None
 
 
 def set_research_to_target(
@@ -1483,16 +1504,33 @@ def main() -> None:
     checkpoint_path = Path(args.checkpoint).expanduser()
     if not checkpoint_path.exists():
         raise SystemExit(f"Checkpoint file {checkpoint_path} not found.")
+    checkpoint_written = False
+    default_checkpoint_dir = _resolve_checkpoint_dir_from_env()
+    if default_checkpoint_dir is not None:
+        _write_checkpoint_file(default_checkpoint_dir, checkpoint_path)
+        checkpoint_written = True
     if args.score_log:
         score_log_path = Path(args.score_log).expanduser()
         _write_checkpoint_file(score_log_path.parent, checkpoint_path)
+        checkpoint_written = True
     turn_score_writer = None
     turn_score_fp = None
     if args.turn_score_csv:
+        checkpoint_written = True
         turn_score_writer, turn_score_fp = _open_turn_score_csv(
             args.turn_score_csv,
             checkpoint_path,
         )
+
+    if not checkpoint_written:
+        stamp = datetime.datetime.now().strftime("%Y-%m-%d--%H-%M-%S")
+        default_dir = (
+            Path(__file__).resolve().parent.parent
+            / "results"
+            / "live_agent"
+            / stamp
+        )
+        _write_checkpoint_file(default_dir, checkpoint_path)
 
     dir_ids = parse_dir_ids(args.dir_ids)
     tech_weights = parse_tech_weights(args.tech_weight)
