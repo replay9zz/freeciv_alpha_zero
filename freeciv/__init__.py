@@ -17,8 +17,43 @@ except ModuleNotFoundError:  # pragma: no cover
     except ModuleNotFoundError:
         pass
 
-from .config import MapConfig, TrainingConfig  # noqa: F401
-from .game import FreecivGame, CanonicalBoard  # noqa: F401
-from .nnet import NNetWrapper  # noqa: F401
-from .providers import BaseProvider, RandomMapProvider, GroundTruth  # noqa: F401
-from .state import FreecivBoardState, Player  # noqa: F401
+__all__ = [
+    "MapConfig",
+    "TrainingConfig",
+    "FreecivGame",
+    "CanonicalBoard",
+    "NNetWrapper",
+    "BaseProvider",
+    "RandomMapProvider",
+    "GroundTruth",
+    "FreecivBoardState",
+    "Player",
+]
+
+
+def __getattr__(name):
+    if name in {"MapConfig", "TrainingConfig"}:
+        from .config import MapConfig, TrainingConfig
+
+        return {"MapConfig": MapConfig, "TrainingConfig": TrainingConfig}[name]
+    if name in {"FreecivGame", "CanonicalBoard"}:
+        from .game import CanonicalBoard, FreecivGame
+
+        return {"FreecivGame": FreecivGame, "CanonicalBoard": CanonicalBoard}[name]
+    if name == "NNetWrapper":
+        from .nnet import NNetWrapper
+
+        return NNetWrapper
+    if name in {"BaseProvider", "RandomMapProvider", "GroundTruth"}:
+        from .providers import BaseProvider, GroundTruth, RandomMapProvider
+
+        return {
+            "BaseProvider": BaseProvider,
+            "RandomMapProvider": RandomMapProvider,
+            "GroundTruth": GroundTruth,
+        }[name]
+    if name in {"FreecivBoardState", "Player"}:
+        from .state import FreecivBoardState, Player
+
+        return {"FreecivBoardState": FreecivBoardState, "Player": Player}[name]
+    raise AttributeError(name)

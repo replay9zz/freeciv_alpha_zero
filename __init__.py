@@ -1,13 +1,52 @@
-"""AlphaZero-ready Freeciv adapters."""
+"""AlphaZero-ready Freeciv adapters.
 
-# AlphaZero primitives (vendored from alpha-zero-general)
-from .Arena import Arena  # noqa: F401
-from .Coach import Coach  # noqa: F401
-from .Game import Game  # noqa: F401
-from .MCTS import MCTS  # noqa: F401
-from .NeuralNet import NeuralNet  # noqa: F401
-from . import utils  # noqa: F401
+Keep package import side effects minimal so live-control utilities can import
+`freeciv_alpha_zero.freeciv.*` without pulling optional training UI deps.
+"""
 
-# Freeciv-specific helpers
-from .freeciv.game import FreecivGame  # re-export for convenience
-from .freeciv.nnet import NNetWrapper as FreecivNNet  # noqa: F401
+__all__ = [
+    "Arena",
+    "Coach",
+    "Game",
+    "MCTS",
+    "NeuralNet",
+    "utils",
+    "FreecivGame",
+    "FreecivNNet",
+]
+
+
+def __getattr__(name):
+    if name == "Arena":
+        from .Arena import Arena
+
+        return Arena
+    if name == "Coach":
+        from .Coach import Coach
+
+        return Coach
+    if name == "Game":
+        from .Game import Game
+
+        return Game
+    if name == "MCTS":
+        from .MCTS import MCTS
+
+        return MCTS
+    if name == "NeuralNet":
+        from .NeuralNet import NeuralNet
+
+        return NeuralNet
+    if name == "utils":
+        from . import utils
+
+        return utils
+    if name == "FreecivGame":
+        from .freeciv.game import FreecivGame
+
+        return FreecivGame
+    if name == "FreecivNNet":
+        from .freeciv.nnet import NNetWrapper as FreecivNNet
+
+        return FreecivNNet
+    raise AttributeError(name)
