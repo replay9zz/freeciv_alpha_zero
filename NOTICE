@@ -1,0 +1,19 @@
+Freeciv AlphaZero
+
+Copyright (c) 2025-2026 Hiroki Okabe
+
+This project is distributed under the GNU General Public License version 3
+(GPL-3.0-only).
+
+This project includes code derived from AlphaZero General:
+
+  Copyright (c) 2025 Surag Nair
+  https://github.com/suragnair/alpha-zero-general
+
+AlphaZero General was originally licensed under the MIT License. The original
+MIT license text is preserved in ALPHA_ZERO_GENERAL_LICENSE and
+LICENSES/ALPHA_ZERO_GENERAL_MIT.txt.
+
+Substantial Freeciv-specific modifications, environment adapters, training
+harnesses, and related model code are authored by Hiroki Okabe and distributed
+under the GNU General Public License version 3 (GPL-3.0-only).

@@ -1,6 +1,14 @@
 # Freeciv Learning Environment for AlphaZero
 This repo is Freeciv Learning Environment for AlphaZero based on [AlphaZero General](https://github.com/suragnair/alpha-zero-general)
 
+## License
+
+This project is distributed under the GNU General Public License version 3
+(GPL-3.0-only).
+Portions are derived from AlphaZero General, originally licensed under the MIT
+License by Surag Nair. See [NOTICE](NOTICE) and
+[ALPHA_ZERO_GENERAL_LICENSE](ALPHA_ZERO_GENERAL_LICENSE).
+
 ## Train
 Example:
 ```bash
